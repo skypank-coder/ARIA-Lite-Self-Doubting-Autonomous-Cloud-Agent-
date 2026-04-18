@@ -3,7 +3,7 @@
 
 > *"Every other team showed you a system that executes. We showed you a system that knows when not to."*
 
-** AWS Track · Self-Doubting Autonomous Cloud Agent**
+**AWS Track · Self-Doubting Autonomous Cloud Agent**
 
 ---
 
