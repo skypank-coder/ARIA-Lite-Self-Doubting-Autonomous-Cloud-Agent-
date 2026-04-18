@@ -197,7 +197,6 @@ export function DependencyGraph({ data, loading, viewMode, onViewChange }: Depen
     timeoutsRef.current.forEach(clearTimeout);
     timeoutsRef.current = [];
     setVisibleWaves([]);
-    setWaveCounter(0);
     if (loading || !rawNodes.length) return;
 
     let count = 0;
