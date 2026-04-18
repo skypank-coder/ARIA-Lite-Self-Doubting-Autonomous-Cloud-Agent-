@@ -2,9 +2,15 @@ services:
   - type: web
     name: aria-lite-backend
     runtime: python
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    rootDir: backend
+
+    buildCommand: |
+      python --version
+      pip install --upgrade pip
+      pip install -r requirements.txt
+
     startCommand: gunicorn main:app -w 2 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120
+
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.11
-    rootDir: backend
+        value: 3.11.9
