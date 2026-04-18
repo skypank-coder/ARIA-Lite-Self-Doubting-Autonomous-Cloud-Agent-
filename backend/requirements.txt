@@ -4,3 +4,4 @@ gunicorn==21.2.0
 pydantic==1.10.13
 networkx==3.4.2
 groq==0.13.1
+requests==2.31.0
