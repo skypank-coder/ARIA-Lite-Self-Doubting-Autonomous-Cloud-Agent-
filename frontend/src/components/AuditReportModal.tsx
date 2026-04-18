@@ -52,8 +52,10 @@ export function AuditReportModal({ ticket, onClose }: AuditReportModalProps) {
   const fetchReport = useCallback(async () => {
     setLoading(true);
     setError(null);
+    const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+    const url = apiBase ? `${apiBase}/audit/approve` : "/api/audit/approve";
     try {
-      const resp = await fetch("/api/audit/approve", {
+      const resp = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticket }),

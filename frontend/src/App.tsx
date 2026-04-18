@@ -17,6 +17,11 @@ interface Toast {
 
 let toastCounter = 0;
 
+// Resolve backend URL: env var in production, /api proxy in local dev
+const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
+const apiUrl = (path: string) =>
+  API_BASE ? `${API_BASE}${path}` : `/api${path}`;
+
 export default function App() {
   const [activePreset, setActivePreset] = useState<string | null>(null);
   const [ticket, setTicket] = useState<string>("");
@@ -50,7 +55,7 @@ export default function App() {
     const startTime = Date.now();
 
     try {
-      const resp = await fetch("/api/process_ticket", {
+      const resp = await fetch(apiUrl("/process_ticket"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticket: ticketText }),

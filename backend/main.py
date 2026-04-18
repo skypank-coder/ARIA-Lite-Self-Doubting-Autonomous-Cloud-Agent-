@@ -31,13 +31,30 @@ from dependency_graph import (
 
 app = FastAPI(title="ARIA-Lite++ v3-engine", version="5.0.0")
 
+# CORS — explicit origins for production, wildcard fallback for local dev
+_CORS_ORIGINS = [
+    "https://aria-lite-self-doubting-autonomous-cloud-agent.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:3000",
+]
+# Allow any Vercel preview deploy (*.vercel.app)
+_CORS_ORIGIN_REGEX = r"https://.*\.vercel\.app"
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_origin_regex=_CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    return {"status": "ok"}
 
 # Singleton graph for /graph endpoint
 _GRAPH = None
