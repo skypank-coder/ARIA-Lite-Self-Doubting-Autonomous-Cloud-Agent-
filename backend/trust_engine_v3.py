@@ -32,8 +32,11 @@ def is_safe(verb: str) -> bool:
     return verb in {
         "safe", "create", "attach", "backup", "deploy",
         "add", "enable", "snapshot", "restore",
-        "read", "list", "describe"
+        "read", "list", "describe", "safe_mutating",
     }
+
+def is_safe_mutating(verb: str) -> bool:
+    return verb == "safe_mutating"
 
 
 # -----------------------------
@@ -43,6 +46,8 @@ def is_safe(verb: str) -> bool:
 def compute_intent_score(verb: str, env: str) -> float:
     if is_safe(verb):
         return 0.95
+    if verb == "safe_mutating":
+        return 0.75
     if is_scaling(verb):
         return 0.85
     if is_destructive(verb):
@@ -63,6 +68,8 @@ def compute_reversibility(service: str, verb: str) -> float:
 
     if is_destructive(verb):
         base *= 0.40
+    elif verb == "safe_mutating":
+        base = min(base + 0.35, 0.95)   # rotate/refresh: more reversible than mutating
     elif is_safe(verb):
         base = min(base + 0.50, 0.95)
 
@@ -143,6 +150,11 @@ def compute_confidence(
     operational_score = 0.55 * reversibility + 0.45 * blast_component
     confidence = intent * policy * operational_score
 
+    # Smooth extremes — removes sharp jumps
+    # Use smaller weight for non-destructive verbs to preserve their range
+    smooth_weight = 0.10 if is_destructive(verb) else 0.05
+    confidence = (1 - smooth_weight) * confidence + smooth_weight * (intent * policy)
+
     if policy <= 0.10:
         confidence *= 0.40
 
@@ -165,19 +177,19 @@ def calibrate_confidence(conf: float, verb: str) -> float:
         # Floor: visible minimum without hiding extreme risk
         conf = max(conf, 0.01) if is_destructive(verb) else conf
         if conf < 0.20:
-            return conf * 1.4       # gentle lift (was 1.6 — too aggressive)
+            return conf * 1.25      # reduced from 1.4 — prevents over-lifting risky ops
         if conf < 0.40:
             return conf * 1.2
         if conf > 0.80:
-            return min(conf * 0.95, 0.90)   # symmetric trim at top
+            return min(conf * 0.95, 0.90)
         return conf * 0.85
     else:
         if conf > 0.85:
             return min(conf * 0.95, 0.90)
-        if conf > 0.70:
-            return conf * 1.05
+        if conf > 0.65:
+            return min(conf * 1.12, 0.92)   # safe ops: lift into AUTO range
         if conf > 0.60 and is_scaling(verb):
-            return conf * 1.10   # scaling ops with moderate blast get a lift
+            return conf * 1.10
         return conf
 
 

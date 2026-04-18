@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useRef } from "react";
 import { Topbar } from "@/components/Topbar";
 import { PresetTabs } from "@/components/PresetTabs";
 import { TrustDecomp } from "@/components/TrustDecomp";
@@ -7,19 +7,13 @@ import { DebateEngine } from "@/components/DebateEngine";
 import { PreMortem } from "@/components/PreMortem";
 import { ExecutionLog } from "@/components/ExecutionLog";
 import { TicketInput } from "@/components/TicketInput";
-import { getMockResponse, PRESETS, type ARIAResponse } from "@/lib/presets";
+import { SystemStatusBar } from "@/components/SystemStatusBar";
+import { type ARIAResponse } from "@/lib/presets";
+import { getApiUrl } from "@/lib/api";
 
 interface Toast {
   id: number;
   message: string;
-}
-
-interface AnalysisHistory {
-  id: string;
-  ticket: string;
-  scenario: string;
-  data: ARIAResponse;
-  timestamp: number;
 }
 
 let toastCounter = 0;
@@ -33,10 +27,8 @@ export default function App() {
   const [viewMode, setViewMode] = useState<"graph" | "simulation">("graph");
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [memoryCount, setMemoryCount] = useState(0);
-  const [memoryTooltip, setMemoryTooltip] = useState<string | null>(null);
+  const [memoryTooltip, setMemoryTooltip] = useState<string | undefined>(undefined);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [history, setHistory] = useState<AnalysisHistory[]>([]);
-  const [useRealBackend, setUseRealBackend] = useState<boolean>(true);
   const abortRef = useRef<AbortController | null>(null);
 
   const addToast = useCallback((message: string) => {
@@ -60,7 +52,7 @@ export default function App() {
     const startTime = Date.now();
 
     try {
-      const resp = await fetch("/api/process_ticket", {
+      const resp = await fetch(getApiUrl("process_ticket"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticket: ticketText }),
@@ -71,23 +63,13 @@ export default function App() {
 
       const json: ARIAResponse = await resp.json();
       const elapsed = Date.now() - startTime;
-      
+
       setElapsedMs(elapsed);
       setData(json);
-      const scenario = json.scenario || "unknown";
+      const scenario = json.scenario ?? "unknown";
       setCurrentScenario(scenario);
 
-      // Add to history
-      const historyItem: AnalysisHistory = {
-        id: `${Date.now()}`,
-        ticket: ticketText,
-        scenario,
-        data: json,
-        timestamp: Date.now(),
-      };
-      setHistory(prev => [historyItem, ...prev].slice(0, 20)); // Keep last 20
-
-      if (json.rollback_active) {
+      if (json.has_rollback) {
         setMemoryCount(prev => prev + 1);
         setMemoryTooltip("ec2_scale — RDS pool exhaustion — eu-west-1");
       }
@@ -95,7 +77,7 @@ export default function App() {
       addToast(`Analysis complete: ${scenario}`);
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
-      
+
       const elapsed = Date.now() - startTime;
       setElapsedMs(elapsed);
 
@@ -183,6 +165,8 @@ export default function App() {
         onSubmit={handleAnalyze}
         loading={loading}
       />
+
+      <SystemStatusBar data={data} elapsedMs={elapsedMs} />
 
       <div
         style={{

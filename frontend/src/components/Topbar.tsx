@@ -3,7 +3,7 @@ import { useState, useRef, useEffect } from "react";
 interface TopbarProps {
   elapsedMs: number | null;
   memoryCount: number;
-  memoryTooltip: string | null;
+  memoryTooltip: string | null | undefined;
 }
 
 export function Topbar({ elapsedMs, memoryCount, memoryTooltip }: TopbarProps) {

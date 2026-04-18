@@ -20,7 +20,13 @@ export function DebateEngine({ data, loading }: DebateEngineProps) {
     return () => timers.forEach(clearTimeout);
   }, [data, loading]);
 
-  const debate = data?.debate;
+  const debate   = data?.debate;
+  const meta     = data?.parsed_meta;
+  const sdFlags  = data?.self_doubt_flags ?? [];
+
+  const envColor = (env?: string) =>
+    env === "production" ? "#CF3A3A" :
+    env === "dev"        ? "#1DB87A" : "#E07B2A";
 
   return (
     <div
@@ -39,6 +45,36 @@ export function DebateEngine({ data, loading }: DebateEngineProps) {
       >
         <span className="panel-header">Debate Engine</span>
       </div>
+
+      {/* Parsed metadata row */}
+      {!loading && meta && (
+        <div
+          className="flex items-center gap-2 px-3 py-1.5 flex-wrap"
+          style={{ borderBottom: "1px solid var(--aria-border)", background: "rgba(0,0,0,0.15)" }}
+        >
+          {([
+            { label: "VERB",    val: meta.verb_class },
+            { label: "SERVICE", val: meta.service },
+            { label: "ENV",     val: meta.environment, color: envColor(meta.environment) },
+            { label: "URGENCY", val: meta.urgency },
+          ] as Array<{ label: string; val: string; color?: string }>).map(({ label, val, color }) => (
+            <span
+              key={label}
+              className="mono"
+              style={{
+                fontSize: 9,
+                letterSpacing: "0.05em",
+                color: color ?? "var(--aria-muted)",
+                background: "var(--aria-border)",
+                padding: "1px 5px",
+                borderRadius: 3,
+              }}
+            >
+              {label}: {val}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex flex-col gap-0 px-3 py-2 overflow-y-auto flex-1">
         {loading ? (
           <>
@@ -69,6 +105,47 @@ export function DebateEngine({ data, loading }: DebateEngineProps) {
             />
           </>
         ) : null}
+
+        {/* Self-Doubt Flags */}
+        {!loading && sdFlags.length > 0 && (
+          <div style={{ borderTop: "1px solid var(--aria-border)", marginTop: 6, paddingTop: 6 }}>
+            <span className="panel-header" style={{ fontSize: 9, display: "block", marginBottom: 4 }}>
+              Self-Doubt Signals
+            </span>
+            {sdFlags.map((f, i) => {
+              const isCritical = ["PROD_RISK", "CONTRADICTION", "EXTREME_SCALE"].includes(f.type);
+              return (
+                <div
+                  key={i}
+                  className="flex items-center gap-2 fade-in"
+                  style={{ marginBottom: 3 }}
+                >
+                  <span
+                    className="mono"
+                    style={{
+                      fontSize: 8,
+                      letterSpacing: "0.05em",
+                      padding: "1px 4px",
+                      borderRadius: 3,
+                      flexShrink: 0,
+                      background: isCritical ? "#CF3A3A" : "rgba(224,123,42,0.2)",
+                      color: isCritical ? "#fff" : "#E07B2A",
+                      border: isCritical ? "none" : "1px solid #E07B2A",
+                    }}
+                  >
+                    {f.type}
+                  </span>
+                  <span style={{ fontSize: 10, color: "var(--aria-text)", flex: 1, fontFamily: "Inter, sans-serif" }}>
+                    {f.msg}
+                  </span>
+                  <span className="mono" style={{ fontSize: 9, color: "var(--aria-muted)", flexShrink: 0 }}>
+                    {f.impact}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

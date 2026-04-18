@@ -1,90 +1,121 @@
 """
-Memory Store v5 — ARIA-Lite++
-Cumulative incident tracking with pattern detection and graduated penalties.
+memory.py — ARIA-Lite++
+Production-ready memory store with 3-key keying, verb normalization,
+exponential decay penalty, and pattern detection.
 """
 
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
 
-class MemoryStore:
+class Memory:
     def __init__(self):
-        self.incidents: Dict[str, List[Dict]] = {}
-        self.patterns:  Dict[str, str] = {}
+        self.patterns:  Dict[str, Dict] = {}   # key → {count, history}
         self.audit_log: List[Dict] = []
 
-    # ── Incident recording ────────────────────────────────────────────────────
+    # ── Normalization ─────────────────────────────────────────────────────────
 
-    def record(self, intent: str, outcome: str, note: str, confidence: float) -> None:
-        if intent not in self.incidents:
-            self.incidents[intent] = []
-        self.incidents[intent].append({
+    def normalize_verb(self, verb: str) -> str:
+        if verb in {"delete", "remove", "destroy", "purge", "drop",
+                    "terminate", "wipe", "revoke"}:
+            return "destructive"
+        if verb in {"scale", "increase", "decrease", "resize",
+                    "expand", "shrink", "autoscale"}:
+            return "scaling"
+        if verb in {"create", "attach", "deploy", "add", "enable",
+                    "backup", "snapshot", "restore"}:
+            return "safe"
+        if verb in {"modify", "update", "change", "configure",
+                    "patch", "rotate", "mutating"}:
+            return "mutating"
+        return verb
+
+    def build_key(self, service: str, verb: str, env: str) -> str:
+        norm = self.normalize_verb(verb)
+        return f"{service}_{norm}_{env}"
+
+    # ── Record ────────────────────────────────────────────────────────────────
+
+    def record(self, service: str = None, verb: str = None, env: str = None,
+               outcome: str = "UNKNOWN", confidence: float = 0.0, note: str = "",
+               gate: str = "",
+               intent: str = None, **kwargs) -> None:
+        """
+        Record an incident. Supports both new 3-key API and legacy intent-key API.
+        """
+        if intent is not None:
+            key = intent
+        else:
+            key = self.build_key(service or "unknown", verb or "unknown", env or "unknown")
+
+        if key not in self.patterns:
+            self.patterns[key] = {"count": 0, "history": [], "confidence_timeline": []}
+
+        self.patterns[key]["count"] += 1
+        self.patterns[key]["history"].append({
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
             "outcome":    outcome,
-            "note":       note,
             "confidence": confidence,
-            "ts":         datetime.now(timezone.utc).isoformat(),
+            "note":       note,
         })
-        self._detect_pattern(intent)
 
-    def _detect_pattern(self, intent: str) -> None:
-        count = len(self.incidents.get(intent, []))
-        if count >= 3:
-            self.patterns[intent] = "REPEATED_FAILURE"
-        elif count >= 2:
-            self.patterns[intent] = "RECURRING_RISK"
-        elif count == 1:
-            self.patterns[intent] = "PRIOR_INCIDENT"
+        # Confidence timeline — capped at 8 entries
+        tl = self.patterns[key]["confidence_timeline"]
+        tl.append({
+            "confidence": round(confidence, 3),
+            "gate":       gate or ("AUTO" if confidence >= 0.80 else "APPROVE" if confidence >= 0.50 else "BLOCK"),
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
+        })
+        if len(tl) > 8:
+            self.patterns[key]["confidence_timeline"] = tl[-8:]
 
-    # ── Legacy add_memory (backward compat) ───────────────────────────────────
+    # ── Penalty ───────────────────────────────────────────────────────────────
 
-    def add_memory(self, key: str, value: Dict) -> None:
-        self.record(
-            intent=key,
-            outcome=value.get("outcome", "UNKNOWN"),
-            note=value.get("note", ""),
-            confidence=value.get("confidence", 0.0),
+    def get_penalty(self, service: str = None, verb: str = None, env: str = None,
+                    intent: str = None) -> Dict[str, Any]:
+        """
+        Returns penalty dict. Supports both new 3-key API and legacy intent-key API.
+        """
+        if intent is not None:
+            key = intent
+        else:
+            key = self.build_key(service or "unknown", verb or "unknown", env or "unknown")
+
+        if key not in self.patterns:
+            return {"count": 0, "penalty": 1.0, "active": False,
+                    "pattern": None, "note": None}
+
+        count = self.patterns[key]["count"]
+        decay = round(max(0.70, 1.0 - 0.08 * count), 3)
+
+        history = self.patterns[key]["history"]
+        last_note = history[-1]["note"] if history else None
+
+        pattern = (
+            "REPEATED_FAILURE" if count >= 3 else
+            "RECURRING_RISK"   if count >= 2 else
+            "PRIOR_INCIDENT"
         )
 
-    def get_memory(self, key: str) -> List[Dict]:
-        return self.incidents.get(key, [])
-
-    def has_prior_failure(self, key: str) -> bool:
-        return len(self.incidents.get(key, [])) > 0
-
-    def clear_memory(self, key: str) -> None:
-        self.incidents.pop(key, None)
-        self.patterns.pop(key, None)
-
-    # ── Penalty computation ───────────────────────────────────────────────────
-
-    def get_penalty(self, intent: str) -> Dict[str, Any]:
-        """
-        Returns graduated penalty dict.
-        Each incident adds weight, capped at severity=3.
-        """
-        incidents = self.incidents.get(intent, [])
-        count = len(incidents)
-        if count == 0:
-            return {"active": False, "note": None, "multiplier": 1.0}
-
-        severity = min(count, 3)
         return {
-            "active":                True,
-            "count":                 count,
-            "pattern":               self.patterns.get(intent, "PRIOR_INCIDENT"),
-            "note":                  incidents[-1]["note"],
-            "reversibility_penalty": 0.05 * severity,
-            "policy_penalty":        0.05 * severity,
-            "blast_penalty":         0.03 * severity,
-            "multiplier":            max(0.70, 1.0 - (0.05 * severity)),
+            "count":   count,
+            "penalty": decay,
+            "active":  True,
+            "pattern": pattern,
+            "note":    last_note,
+            # legacy fields
+            "multiplier":            decay,
+            "reversibility_penalty": 0.05 * min(count, 3),
+            "policy_penalty":        0.05 * min(count, 3),
+            "blast_penalty":         0.03 * min(count, 3),
         }
 
-    # ── Audit log ─────────────────────────────────────────────────────────────
+    # ── Audit ─────────────────────────────────────────────────────────────────
 
-    def write_audit(self, entry: Dict) -> None:
+    def write_audit(self, data: Dict) -> None:
         self.audit_log.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            **entry,
+            **data,
         })
 
     def get_audit_log(self) -> List[Dict]:
@@ -93,12 +124,48 @@ class MemoryStore:
     def clear_audit_log(self) -> None:
         self.audit_log = []
 
-    # ── Legacy data property (backward compat) ────────────────────────────────
+    # ── Legacy compat ─────────────────────────────────────────────────────────
+
+    def add_memory(self, key: str, value: Dict) -> None:
+        self.record(intent=key, outcome=value.get("outcome", "UNKNOWN"),
+                    note=value.get("note", ""), confidence=value.get("confidence", 0.0))
+
+    def get_memory(self, key: str) -> List[Dict]:
+        return self.patterns.get(key, {}).get("history", [])
+
+    def has_prior_failure(self, key: str) -> bool:
+        return self.patterns.get(key, {}).get("count", 0) > 0
+
+    def clear_memory(self, key: str) -> None:
+        self.patterns.pop(key, None)
+
+    def get_timeline(self, service: str) -> List[Dict]:
+        """Return all memory entries whose key starts with service."""
+        result = []
+        for key, val in self.patterns.items():
+            if key.startswith(service + "_"):
+                count = val["count"]
+                decay = round(max(0.70, 1.0 - 0.08 * count), 3)
+                result.append({
+                    "key":     key,
+                    "count":   count,
+                    "penalty": decay,
+                    "history": val.get("confidence_timeline", []),
+                })
+        return result
 
     @property
-    def data(self) -> Dict[str, List[Dict]]:
+    def total_count(self) -> int:
+        return sum(v["count"] for v in self.patterns.values())
+
+    @property
+    def incidents(self) -> Dict:
+        return {k: v["history"] for k, v in self.patterns.items()}
+
+    @property
+    def data(self) -> Dict:
         return self.incidents
 
 
 # Global singleton
-memory = MemoryStore()
+memory = Memory()

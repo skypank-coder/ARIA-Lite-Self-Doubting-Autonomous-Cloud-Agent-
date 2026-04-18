@@ -1,7 +1,7 @@
 import { PRESETS } from "@/lib/presets";
 
 interface PresetTabsProps {
-  activeId: string;
+  activeId: string | null;
   onSelect: (id: string, ticket: string) => void;
 }
 

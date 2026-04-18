@@ -24,17 +24,17 @@ export default defineConfig({
   },
   root: path.resolve(import.meta.dirname),
   build: {
-    outDir: path.resolve(import.meta.dirname, "dist/public"),
+    outDir: path.resolve(import.meta.dirname, "dist"),
     emptyOutDir: true,
   },
   server: {
     port,
     host: "0.0.0.0",
     proxy: {
-      "/api/": {
-        target: "http://localhost:8001",
+      "/api": {
+        target: "http://127.0.0.1:8001",
         changeOrigin: true,
-        rewrite: (path) => path.slice(4),
+        rewrite: (path) => path.replace(/^\/api/, ""),
       },
     },
   },

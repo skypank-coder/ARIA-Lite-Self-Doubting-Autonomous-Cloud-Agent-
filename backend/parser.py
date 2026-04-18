@@ -28,7 +28,11 @@ _DESTRUCTIVE_VERBS = {
 _MUTATING_VERBS = {
     "modify", "update", "change", "configure", "patch", "edit",
     "alter", "adjust", "set", "override", "replace", "migrate",
-    "rotate", "renew", "refresh", "reboot", "restart", "reset",
+    "reset",
+}
+
+_SAFE_MUTATING_VERBS = {
+    "rotate", "renew", "refresh", "reboot", "restart", "upgrade",
 }
 
 _SCALING_VERBS = {
@@ -56,6 +60,9 @@ def extract_verb(ticket: str) -> str:
     for v in _MUTATING_VERBS:
         if re.search(rf"\b{re.escape(v)}\b", t):
             return "mutating"
+    for v in _SAFE_MUTATING_VERBS:
+        if re.search(rf"\b{re.escape(v)}\b", t):
+            return "safe_mutating"
     for v in _SAFE_VERBS:
         if re.search(rf"\b{re.escape(v)}\b", t):
             return "safe"

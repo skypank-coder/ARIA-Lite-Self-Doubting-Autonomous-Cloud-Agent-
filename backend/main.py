@@ -18,6 +18,11 @@ from parser import parse_ticket, ParsedIntent
 from trust_engine_v3 import run_trust_engine, gate_decision
 from iam_simulator import get_iam_simulation
 from memory import memory
+from ai_debate import run_ai_debate
+from self_doubt import apply_self_doubt
+from simulation_engine import run_simulation
+from dynamic_graph import get_affected_nodes, build_dynamic_graph
+from ai_layer import ai_adjustment
 from scenarios import SCENARIOS
 from dependency_graph import (
     build_graph, compute_blast_radius as _dep_blast,
@@ -76,25 +81,9 @@ def _map_gate(v3_decision: str) -> str:
 def _to_v3(parsed: ParsedIntent) -> Dict:
     """
     Build the flat dict that trust_engine_v3.run_trust_engine expects.
-    affected_nodes is derived from risk_signals so the blast radius
-    reflects the actual parsed context.
+    Uses dynamic_graph to derive affected_nodes from parsed service.
     """
-    # Map risk signals to a list of affected service names
-    signal_nodes = {
-        "prod_destructive": ["ec2", "rds", "lambda", "alb"],
-        "admin_privilege":  ["ec2", "lambda", "api"],
-        "extreme_scale":    ["rds", "alb", "cloudwatch"],
-        "large_scale":      ["rds", "alb"],
-        "irreversible_db":  ["ec2", "lambda"],
-        "cross_account":    ["iam", "ec2"],
-        "public_s3":        ["lambda", "cloudwatch"],
-    }
-    affected: List[str] = []
-    for sig in parsed.risk_signals:
-        for node in signal_nodes.get(sig, []):
-            if node not in affected:
-                affected.append(node)
-
+    affected = get_affected_nodes(parsed)
     return {
         "verb":           parsed.action_verb,
         "service":        parsed.service,
@@ -317,29 +306,77 @@ def _build_simulation(trust: Dict, parsed: ParsedIntent) -> List[Dict]:
 
 def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
     v3_input = _to_v3(parsed)
-    trust    = run_trust_engine(v3_input)          # only engine called
-    gate     = _map_gate(trust["decision"])        # AUTO / APPROVE / BLOCK
 
-    # Memory
-    memory_key = f"{parsed.service}_{parsed.action_verb}"
-    penalty    = memory.get_penalty(memory_key)
+    # ── Base scoring (trust_engine_v3 only) ──────────────────────────────────
+    trust = run_trust_engine(v3_input)
+    trust["affected_count"] = len(v3_input["affected_nodes"])
 
-    # EC2 scaling AUTO → record rollback
+    # ── Memory penalty (3-key: service + verb + env) ────────────────────────
+    penalty = memory.get_penalty(
+        service=parsed.service,
+        verb=parsed.action_verb,
+        env=parsed.environment,
+    )
+    conf_after_memory = round(trust["confidence"] * penalty["penalty"], 4)
+
+    # ── Unknown service guard ─────────────────────────────────────────────────
+    if parsed.service == "unknown":
+        conf_after_memory = round(conf_after_memory * 0.70, 4)
+
+    # ── AI layer (semantic reasoning) ────────────────────────────────────────
+    conf_after_ai, ai_notes = ai_adjustment(ticket, conf_after_memory)
+
+    # ── Self-doubt (second-pass reasoning) ───────────────────────────────────
+    trust["confidence"] = conf_after_ai
+    final_conf, doubt_factors = apply_self_doubt(parsed, trust, conf_after_ai)
+
+    # ── Clamp ─────────────────────────────────────────────────────────────────
+    final_conf = round(max(0.0, min(1.0, final_conf)), 4)
+    trust["confidence"] = final_conf
+
+    # ── Gate (recomputed after all adjustments) ───────────────────────────────
+    gate = _map_gate(gate_decision(final_conf))
+
+    # ── Memory learning ───────────────────────────────────────────────────────
+    if gate == "BLOCK":
+        # BUG 1 FIX: record only FAIL — never also RISKY_PATTERN for same ticket
+        memory.record(service=parsed.service, verb=parsed.action_verb,
+                      env=parsed.environment, outcome="FAIL", gate=gate,
+                      confidence=final_conf, note="Blocked high-risk operation")
+    elif gate == "AUTO":
+        memory.record(service=parsed.service, verb=parsed.action_verb,
+                      env=parsed.environment, outcome="SUCCESS", gate=gate,
+                      confidence=final_conf)
+    elif gate == "APPROVE" and 0.30 <= final_conf <= 0.60:
+        # Only record RISKY_PATTERN when gate is APPROVE (not BLOCK)
+        memory.record(service=parsed.service, verb=parsed.action_verb,
+                      env=parsed.environment, outcome="RISKY_PATTERN", gate=gate,
+                      confidence=final_conf, note="Borderline risky operation")
+
+    # EC2 rollback learning
     has_rollback = False
     if parsed.service == "ec2" and parsed.action_verb == "scaling" and gate == "AUTO":
         has_rollback = True
-        memory.record(intent=memory_key, outcome="ROLLBACK",
-                      note="RDS pool exhaustion eu-west-1", confidence=trust["confidence"])
+        memory.record(service=parsed.service, verb=parsed.action_verb,
+                      env=parsed.environment, outcome="ROLLBACK", gate=gate,
+                      confidence=final_conf, note="RDS pool exhaustion")
 
-    debate        = _build_debate(parsed, trust, gate)
+    # ── Dynamic graph ─────────────────────────────────────────────────────────
+    graph = build_dynamic_graph(parsed)
+
+    # ── AI Debate ─────────────────────────────────────────────────────────────
+    debate = run_ai_debate(ticket, trust)
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+    simulation = run_simulation(parsed, trust)
+
+    # ── Pre-mortem + execution log + IAM sim ───────────────────────────────
     premortem     = _build_premortem(parsed, gate)
     execution_log = _build_execution_log(parsed, trust, gate)
-    simulation    = _build_simulation(trust, parsed)
     iam_sim       = get_iam_simulation(parsed.scope, parsed.action_verb)
 
     scenario_label = f"{parsed.service}_{parsed.action_verb}"
-
-    _write_audit(ticket, trust["confidence"], gate)
+    _write_audit(ticket, final_conf, gate)
 
     return {
         "scenario":  scenario_label,
@@ -349,7 +386,7 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
             "reversibility": trust["reversibility"],
             "blast_radius":  trust["blast_radius"],
             "policy_score":  trust["policy_score"],
-            "confidence":    trust["confidence"],
+            "confidence":    final_conf,
         },
         "debate":        debate,
         "premortem":     premortem,
@@ -365,20 +402,38 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
             "scope":        parsed.scope,
             "risk_signals": parsed.risk_signals,
         },
-        "contradictions": parsed.contradictions,
-        "iam_simulation": iam_sim,
+        "contradictions":  parsed.contradictions,
+        "iam_simulation":  iam_sim,
+        "graph":           graph,
+        "self_doubt":      doubt_factors,
+        "self_doubt_flags": doubt_factors,   # alias for frontend
+        "ai_notes":        ai_notes,
+        "parsed_meta": {
+            "verb_class":   parsed.action_verb,
+            "service":      parsed.service,
+            "environment":  parsed.environment,
+            "urgency":      parsed.urgency,
+            "risk_signals": parsed.risk_signals,
+        },
+        "memory_timeline": memory.get_timeline(parsed.service),
         "memory": {
-            "active":  penalty.get("active", False),
-            "count":   penalty.get("count", 0),
-            "pattern": penalty.get("pattern"),
-            "note":    penalty.get("note"),
+            "active":      penalty["active"],
+            "count":       penalty["count"],
+            "pattern":     penalty.get("pattern"),
+            "note":        penalty.get("note"),
+            "penalty":     penalty["penalty"],
+            "total_count": memory.total_count,
         },
         "uncertainty": {
-            "score": round(0.30 if parsed.service == "unknown" else
-                           0.15 if parsed.environment == "unknown" else 0.0, 2),
-            "level": "HIGH" if parsed.service == "unknown" else
-                     "MEDIUM" if parsed.environment == "unknown" else "LOW",
-            "signals": [],
+            "score": round(
+                0.40 if parsed.service == "unknown" else
+                0.20 if parsed.environment == "unknown" else 0.05, 2
+            ),
+            "level": (
+                "HIGH"   if parsed.service == "unknown" else
+                "MEDIUM" if parsed.environment == "unknown" else "LOW"
+            ),
+            "signals":        [f["type"] for f in doubt_factors],
             "recommendation": "CLARIFY INPUT" if parsed.service == "unknown" else "PROCEED",
         },
     }
@@ -394,7 +449,14 @@ def health():
 @app.get("/memory")
 def get_memory_state():
     return {"incidents": memory.incidents, "patterns": memory.patterns,
-            "audit_count": len(memory.get_audit_log())}
+            "audit_count": len(memory.get_audit_log()),
+            "total_count": memory.total_count}
+
+
+@app.get("/memory/timeline/{service}")
+def memory_timeline(service: str):
+    entries = memory.get_timeline(service)
+    return {"service": service, "entries": entries}
 
 
 @app.get("/audit")
@@ -516,3 +578,232 @@ def get_graph(intent: str):
         }
     except Exception as e:
         return {"error": str(e), "intent": intent}
+
+
+# ── Audit report ──────────────────────────────────────────────────────────────
+
+class AuditReportRequest(BaseModel):
+    ticket: str
+    groq_api_key: str = ""
+
+
+def _rule_based_audit(ticket: str, parsed, trust: Dict, gate: str,
+                      penalty: Dict, doubt_factors: List, ai_notes: List) -> str:
+    """
+    Generates a structured audit report without LLM.
+    Used when no Groq API key is provided.
+    """
+    conf    = trust["confidence"]
+    blast   = trust["blast_radius"]
+    rev     = trust["reversibility"]
+    policy  = trust["policy_score"]
+    intent  = trust["intent_score"]
+
+    risk_level = "HIGH" if conf < 0.30 else "MEDIUM" if conf < 0.65 else "LOW"
+
+    doubt_summary = ", ".join(
+        f"{f['type']} ({f['impact']})" for f in doubt_factors
+    ) if doubt_factors else "None detected"
+
+    ai_summary = "; ".join(ai_notes) if ai_notes else "No semantic anomalies"
+
+    memory_summary = (
+        f"{penalty['count']} prior incident(s) — penalty {penalty['penalty']:.2f}x applied"
+        if penalty["active"] else "No prior incidents on record"
+    )
+
+    # Determine verdict
+    if gate == "BLOCK" and conf < 0.15:
+        verdict = "APPROPRIATE"
+        verdict_reason = "System correctly identified high-risk operation and blocked it."
+    elif gate == "AUTO" and conf > 0.80 and not doubt_factors:
+        verdict = "APPROPRIATE"
+        verdict_reason = "High confidence with no self-doubt signals — auto-execution justified."
+    elif gate == "APPROVE" and 0.50 <= conf < 0.80:
+        verdict = "APPROPRIATE"
+        verdict_reason = "Borderline confidence correctly routed to human review."
+    elif gate == "AUTO" and doubt_factors:
+        verdict = "RISKY"
+        verdict_reason = "Auto-executed despite active self-doubt signals — warrants review."
+    elif gate == "BLOCK" and conf > 0.45:
+        verdict = "CONSERVATIVE"
+        verdict_reason = "Blocked at relatively high confidence — may be over-cautious."
+    else:
+        verdict = "APPROPRIATE"
+        verdict_reason = "Decision aligns with computed risk profile."
+
+    # Top 3 failure modes
+    failure_modes = []
+    if blast > 0.30:
+        failure_modes.append(f"Cascade failure — blast radius {blast:.2f} affects downstream services")
+    if rev < 0.30:
+        failure_modes.append(f"Irreversible damage — reversibility {rev:.2f} means recovery is difficult")
+    if policy < 0.50:
+        failure_modes.append(f"Policy violation — score {policy:.2f} indicates compliance risk")
+    if parsed.environment == "production" and parsed.action_verb == "destructive":
+        failure_modes.append("Production outage — destructive action on live environment")
+    if not failure_modes:
+        failure_modes.append("No critical failure modes identified at current risk level")
+    failure_modes = failure_modes[:3]
+
+    report = f"""═══════════════════════════════════════════════════════════
+ARIA-LITE++ CLOUD RISK AUDIT REPORT
+═══════════════════════════════════════════════════════════
+Ticket   : {ticket}
+Service  : {parsed.service.upper()}  |  Action: {parsed.action_verb}
+Env      : {parsed.environment}  |  Gate: {gate}  |  Risk: {risk_level}
+───────────────────────────────────────────────────────────
+
+1. EXECUTIVE SUMMARY
+   Decision: {gate} with confidence {conf:.4f}.
+   Service {parsed.service.upper()} {parsed.action_verb} in {parsed.environment} environment.
+   Risk level assessed as {risk_level} based on blast radius {blast:.2f} and reversibility {rev:.2f}.
+
+2. RISK ASSESSMENT
+   Intent Score  : {intent:.3f}  — {'clear operational intent' if intent > 0.70 else 'ambiguous or risky intent'}
+   Reversibility : {rev:.3f}  — {'easily reversible' if rev > 0.70 else 'difficult to reverse' if rev < 0.30 else 'partially reversible'}
+   Blast Radius  : {blast:.3f}  — {'isolated impact' if blast < 0.15 else 'moderate cascade risk' if blast < 0.40 else 'HIGH cascade risk'}
+   Policy Score  : {policy:.3f}  — {'compliant' if policy > 0.70 else 'policy concern' if policy < 0.40 else 'borderline compliance'}
+   Confidence    : {conf:.4f}
+
+3. KEY FAILURE MODES
+   {''.join(f'   [{i+1}] {fm}{chr(10)}' for i, fm in enumerate(failure_modes))}
+4. SYSTEM BEHAVIOR ANALYSIS
+   Decision correctness : {verdict_reason}
+   Overconfidence check : {'Possible — high confidence despite risk signals' if gate == 'AUTO' and doubt_factors else 'Not detected'}
+   Underestimation check: {'Possible — blocked at moderate confidence' if gate == 'BLOCK' and conf > 0.40 else 'Not detected'}
+
+5. MEMORY IMPACT
+   {memory_summary}
+   {'Penalty reduced confidence from base score.' if penalty['active'] else 'No memory adjustment applied.'}
+
+6. SELF-DOUBT ANALYSIS
+   Signals detected : {doubt_summary}
+   AI layer notes   : {ai_summary}
+   {'Self-doubt correctly reduced confidence before gate decision.' if doubt_factors else 'No anomalies — scoring proceeded without adjustment.'}
+
+7. FINAL VERDICT
+   ▶ {verdict}
+   {verdict_reason}
+═══════════════════════════════════════════════════════════"""
+
+    return report
+
+
+@app.post("/audit/report")
+def audit_report(req: AuditReportRequest):
+    """
+    Generates a structured AI Cloud Risk Audit Report for a ticket.
+    Uses Groq LLM if api key provided, falls back to rule-based generation.
+    """
+    try:
+        ticket = req.ticket.strip()
+        if not ticket:
+            return {"error": "Empty ticket"}
+
+        # Run full pipeline to get all data
+        parsed        = parse_ticket(ticket)
+        v3_input      = _to_v3(parsed)
+        trust         = run_trust_engine(v3_input)
+        trust["affected_count"] = len(v3_input["affected_nodes"])
+
+        penalty           = memory.get_penalty(service=parsed.service,
+                                               verb=parsed.action_verb,
+                                               env=parsed.environment)
+        conf              = round(trust["confidence"] * penalty["penalty"], 4)
+        if parsed.service == "unknown":
+            conf = round(conf * 0.70, 4)
+        conf, ai_notes    = ai_adjustment(ticket, conf)
+        trust["confidence"] = conf
+        conf, doubt_factors = apply_self_doubt(parsed, trust, conf)
+        conf              = round(max(0.0, min(1.0, conf)), 4)
+        trust["confidence"] = conf
+        gate              = _map_gate(gate_decision(conf))
+
+        # Try Groq LLM first
+        if req.groq_api_key:
+            try:
+                import os
+                from groq import Groq
+                doubt_str = "\n  ".join(
+                    f"- {f['type']}: {f['msg']} ({f['impact']})" for f in doubt_factors
+                ) or "  None"
+
+                prompt = f"""You are an AI Cloud Risk Auditor.
+
+Analyze the following autonomous decision made by a cloud orchestration system.
+
+INPUT:
+- Ticket: "{ticket}"
+- Parsed Intent:
+  Service: {parsed.service}
+  Action: {parsed.action_verb}
+  Environment: {parsed.environment}
+  Scope: {parsed.scope}
+  Risk Signals: {parsed.risk_signals}
+
+- Trust Scores:
+  Intent Score: {trust['intent_score']}
+  Reversibility: {trust['reversibility']}
+  Blast Radius: {trust['blast_radius']}
+  Policy Score: {trust['policy_score']}
+  Final Confidence: {conf}
+  Decision: {gate}
+
+- Memory:
+  Prior Incidents Count: {penalty['count']}
+  Penalty Applied: {penalty['penalty']}
+
+- Self-Doubt Signals:
+  {doubt_str}
+
+TASK:
+Generate a structured audit report with:
+
+1. EXECUTIVE SUMMARY (2-3 lines)
+2. RISK ASSESSMENT (why this is safe/risky)
+3. KEY FAILURE MODES (top 3 realistic risks)
+4. SYSTEM BEHAVIOR ANALYSIS
+   - Was the decision correct?
+   - Any overconfidence or underestimation?
+5. MEMORY IMPACT
+   - Did past incidents influence decision?
+6. SELF-DOUBT ANALYSIS
+   - Were contradictions or anomalies detected?
+7. FINAL VERDICT
+   - APPROPRIATE / CONSERVATIVE / RISKY
+
+Keep it concise but technical. Return clean structured text."""
+
+                client   = Groq(api_key=req.groq_api_key)
+                response = client.chat.completions.create(
+                    model=os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile"),
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=800,
+                )
+                report_text = response.choices[0].message.content or ""
+                if report_text.strip():
+                    return {
+                        "report":  report_text,
+                        "source":  "groq_llm",
+                        "gate":    gate,
+                        "confidence": conf,
+                    }
+            except Exception:
+                pass  # fall through to rule-based
+
+        # Rule-based fallback
+        report_text = _rule_based_audit(
+            ticket, parsed, trust, gate, penalty, doubt_factors, ai_notes
+        )
+        return {
+            "report":     report_text,
+            "source":     "rule_based",
+            "gate":       gate,
+            "confidence": conf,
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
