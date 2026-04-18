@@ -392,9 +392,8 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
 
     # ── Gate (recomputed after all adjustments) ───────────────────────────────
     gate = _map_gate(gate_decision(final_conf))
-    # ── Memory learning ───────────────────────────────────────────────────────
+    # ── Memory learning — record every execution so Run 2 sees a prior incident
     if gate == "BLOCK":
-        # BUG 1 FIX: record only FAIL — never also RISKY_PATTERN for same ticket
         memory.record(service=parsed.service, verb=parsed.action_verb,
                       env=parsed.environment, outcome="FAIL", gate=gate,
                       confidence=final_conf, note="Blocked high-risk operation")
@@ -402,11 +401,11 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
         memory.record(service=parsed.service, verb=parsed.action_verb,
                       env=parsed.environment, outcome="SUCCESS", gate=gate,
                       confidence=final_conf)
-    elif gate == "APPROVE" and 0.30 <= final_conf <= 0.60:
-        # Only record RISKY_PATTERN when gate is APPROVE (not BLOCK)
+    elif gate == "APPROVE":
+        # Record ALL APPROVE outcomes — not just the narrow 0.30-0.60 band
         memory.record(service=parsed.service, verb=parsed.action_verb,
                       env=parsed.environment, outcome="RISKY_PATTERN", gate=gate,
-                      confidence=final_conf, note="Borderline risky operation")
+                      confidence=final_conf, note="Borderline operation routed to human")
 
     # EC2 rollback learning
     has_rollback = False
@@ -415,7 +414,6 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
         memory.record(service=parsed.service, verb=parsed.action_verb,
                       env=parsed.environment, outcome="ROLLBACK", gate=gate,
                       confidence=final_conf, note="RDS pool exhaustion")
-
     # ── AI Debate ─────────────────────────────────────────────────────────────
     debate = run_ai_debate(
         ticket, trust,
