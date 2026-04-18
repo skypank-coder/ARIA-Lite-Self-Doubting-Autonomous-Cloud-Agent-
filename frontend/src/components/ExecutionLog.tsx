@@ -1,9 +1,11 @@
 import { useEffect, useState, useRef } from "react";
 import type { ARIAResponse } from "@/lib/presets";
+import { AuditReportModal } from "@/components/AuditReportModal";
 
 interface ExecutionLogProps {
   data: ARIAResponse | null;
   loading: boolean;
+  ticket?: string;
 }
 
 const STATUS_SYMBOL: Record<string, { symbol: string; color: string }> = {
@@ -29,12 +31,13 @@ function isPhaseHeader(msg: string): boolean {
 
 type ApprovalState = "pending" | "approved" | "rejected" | null;
 
-export function ExecutionLog({ data, loading }: ExecutionLogProps) {
+export function ExecutionLog({ data, loading, ticket = "" }: ExecutionLogProps) {
   const [visibleLines, setVisibleLines]     = useState<number>(0);
   const [timestamps, setTimestamps]         = useState<string[]>([]);
   const [approvalState, setApprovalState]   = useState<ApprovalState>(null);
   const [pausedAt, setPausedAt]             = useState<number>(-1);
   const [extraLines, setExtraLines]         = useState<ARIAResponse["execution_log"]>([]);
+  const [showAudit, setShowAudit]           = useState(false);
   const scrollRef  = useRef<HTMLDivElement>(null);
   const timersRef  = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -121,6 +124,7 @@ export function ExecutionLog({ data, loading }: ExecutionLogProps) {
   ];
 
   return (
+    <>
     <div
       className="flex flex-col h-full"
       style={{
@@ -153,6 +157,19 @@ export function ExecutionLog({ data, loading }: ExecutionLogProps) {
             >
               ROLLBACK ACTIVE
             </span>
+          )}
+          {isApprove && !loading && (
+            <button
+              onClick={() => setShowAudit(true)}
+              className="mono"
+              style={{
+                fontSize: 9, padding: "2px 8px", borderRadius: 3,
+                border: "1px solid #E07B2A", color: "#E07B2A",
+                background: "transparent", cursor: "pointer",
+              }}
+            >
+              ↗ AUDIT REPORT
+            </button>
           )}
           {!loading && logs.length > 0 && (
             <span
@@ -263,5 +280,12 @@ export function ExecutionLog({ data, loading }: ExecutionLogProps) {
         )}
       </div>
     </div>
+    {showAudit && (
+      <AuditReportModal
+        ticket={ticket}
+        onClose={() => setShowAudit(false)}
+      />
+    )}
+  </>
   );
 }

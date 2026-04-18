@@ -145,7 +145,7 @@ export default function App() {
         </div>
 
         <div style={{ gridColumn: "3", gridRow: "2", minHeight: 280 }}>
-          <ExecutionLog data={data} loading={loading} />
+          <ExecutionLog data={data} loading={loading} ticket={ticket} />
         </div>
       </div>
 

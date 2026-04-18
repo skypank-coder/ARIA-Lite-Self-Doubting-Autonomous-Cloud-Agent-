@@ -86,7 +86,7 @@ class Memory:
                     "pattern": None, "note": None}
 
         count = self.patterns[key]["count"]
-        decay = round(max(0.70, 1.0 - 0.08 * count), 3)
+        decay = round(max(0.80, 1.0 - 0.05 * count), 3)
 
         history = self.patterns[key]["history"]
         last_note = history[-1]["note"] if history else None
@@ -145,7 +145,7 @@ class Memory:
         for key, val in self.patterns.items():
             if key.startswith(service + "_"):
                 count = val["count"]
-                decay = round(max(0.70, 1.0 - 0.08 * count), 3)
+                decay = round(max(0.80, 1.0 - 0.05 * count), 3)
                 result.append({
                     "key":     key,
                     "count":   count,

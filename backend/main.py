@@ -337,41 +337,61 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
     trust = run_trust_engine(v3_input)
     trust["affected_count"] = len(v3_input["affected_nodes"])
 
-    # ── Memory penalty (3-key: service + verb + env) ────────────────────────
+    # ── Memory penalty (softened: max 0.80, step 0.05) ──────────────────────
     penalty = memory.get_penalty(
         service=parsed.service,
         verb=parsed.action_verb,
         env=parsed.environment,
     )
-    conf_after_memory = round(trust["confidence"] * penalty["penalty"], 4)
+    count = penalty.get("count", 0)
+    memory_factor = max(0.80, 1.0 - 0.05 * count) if count > 0 else 1.0
+    conf = round(trust["confidence"] * memory_factor, 4)
 
-    # ── Unknown service guard ─────────────────────────────────────────────────
+    # ── Unknown service guard (hard block only) ───────────────────────────────
     if parsed.service == "unknown":
-        conf_after_memory = round(conf_after_memory * 0.70, 4)
+        conf = round(conf * 0.70, 4)
 
     # ── AI layer (semantic reasoning) ────────────────────────────────────────
-    conf_after_ai, ai_notes = ai_adjustment(ticket, conf_after_memory)
+    conf, ai_notes = ai_adjustment(ticket, conf)
 
-    # ── Dynamic graph (needed by self-doubt for node count) ────────────────────
+    # ── Dynamic graph (needed by self-doubt for node count) ──────────────────
     graph = build_dynamic_graph(parsed)
 
-    # ── Self-doubt (second-pass reasoning) ───────────────────────────────────
-    trust["confidence"] = conf_after_ai
-    final_conf, doubt_factors = apply_self_doubt(parsed, trust, conf_after_ai)
+    # ── Self-doubt: display flags (for UI) ───────────────────────────────────
+    trust["confidence"] = conf
+    _, doubt_factors = apply_self_doubt(parsed, trust, conf)
     display_doubt_flags = generate_self_doubt(parsed, trust, graph)
 
-    # Apply multiplicative self-doubt penalty to final confidence
-    doubt_penalty = 1.0 - sum(f["impact"] for f in display_doubt_flags)
-    doubt_penalty = max(0.50, doubt_penalty)   # floor at 0.50 to avoid over-penalising
-    final_conf = round(final_conf * doubt_penalty, 4)
+    # ── Controlled self-doubt penalties (max 2, context-aware) ───────────────
+    _DESTRUCTIVE_VERBS = {"delete", "remove", "destroy", "terminate", "purge", "drop", "wipe"}
+    penalties_applied = 0
+
+    if parsed.contradictions and penalties_applied < 2:
+        conf = round(conf * 0.85, 4)
+        penalties_applied += 1
+
+    if parsed.scope.get("scale_factor", 1) > 20 and penalties_applied < 2:
+        conf = round(conf * 0.80, 4)
+        penalties_applied += 1
+
+    if (parsed.environment == "unknown"
+            and parsed.action_verb in _DESTRUCTIVE_VERBS
+            and penalties_applied < 2):
+        conf = round(conf * 0.85, 4)
+        penalties_applied += 1
+
+    # ── Stability boost: safe ops cannot be dragged below 90% of raw score ───
+    _SAFE_VERBS = {"safe", "safe_mutating", "create", "attach", "deploy", "backup",
+                   "snapshot", "restore", "read", "list", "describe"}
+    if parsed.action_verb in _SAFE_VERBS:
+        conf = max(conf, round(trust["confidence"] * 0.90, 4))
 
     # ── Clamp ─────────────────────────────────────────────────────────────────
-    final_conf = round(max(0.0, min(1.0, final_conf)), 4)
+    final_conf = round(max(0.01, min(0.99, conf)), 4)
     trust["confidence"] = final_conf
 
     # ── Gate (recomputed after all adjustments) ───────────────────────────────
     gate = _map_gate(gate_decision(final_conf))
-
     # ── Memory learning ───────────────────────────────────────────────────────
     if gate == "BLOCK":
         # BUG 1 FIX: record only FAIL — never also RISKY_PATTERN for same ticket
@@ -862,7 +882,10 @@ Keep it concise but technical. Return clean structured text."""
         return {"error": str(e)}
 
 
-# ── APPROVE-gate human audit report ──────────────────────────────────────────
+# ── APPROVE-gate structured audit report ─────────────────────────────────
+
+from audit_report import generate_audit_report
+
 
 class ApproveAuditRequest(BaseModel):
     ticket: str
@@ -871,9 +894,9 @@ class ApproveAuditRequest(BaseModel):
 @app.post("/audit/approve")
 def approve_audit(req: ApproveAuditRequest):
     """
-    Generates a concise, action-oriented audit report for APPROVE-gate tickets.
-    Designed for human reviewers who need to decide in under 2 minutes.
-    Only runs when gate == APPROVE; returns 400 otherwise.
+    Structured 8-section audit report for APPROVE-gate tickets.
+    Returns JSON with all sections for PDF rendering on the frontend.
+    Returns 400-style error for AUTO/BLOCK gates.
     """
     try:
         ticket = req.ticket.strip()
@@ -890,144 +913,35 @@ def approve_audit(req: ApproveAuditRequest):
                                      env=parsed.environment)
         conf, ai_notes = ai_adjustment(ticket, round(trust["confidence"] * penalty["penalty"], 4))
         trust["confidence"] = conf
-        conf, doubt_factors = apply_self_doubt(parsed, trust, conf)
+        conf, _ = apply_self_doubt(parsed, trust, conf)
         conf = round(max(0.0, min(1.0, conf)), 4)
         trust["confidence"] = conf
         gate = _map_gate(gate_decision(conf))
 
         if gate != "APPROVE":
             return {
-                "error": f"Ticket resolved as {gate}, not APPROVE — no human review needed",
+                "error": f"Ticket resolved as {gate} — audit report only available for APPROVE gate",
                 "gate": gate,
                 "confidence": conf,
             }
 
-        graph    = build_dynamic_graph(parsed)
-        premortem = _build_premortem(parsed, trust, graph)
+        graph  = build_dynamic_graph(parsed)
+        debate = run_ai_debate(ticket, trust, graph=graph,
+                               contradictions=parsed.contradictions,
+                               env=parsed.environment, verb=parsed.action_verb,
+                               scale=parsed.scope.get("scale_factor", 1.0))
 
-        blast  = trust["blast_radius"]
-        rev    = trust["reversibility"]
-        policy = trust["policy_score"]
-
-        # Binding constraint
-        components = {
-            "intent":        trust["intent_score"],
-            "reversibility": rev,
-            "policy":        policy,
-            "blast_margin":  round(1.0 - blast, 3),
-        }
-        weakest     = min(components, key=components.get)
-        weakest_val = components[weakest]
-
-        # Risk level
-        risk_level = "HIGH" if conf < 0.60 else "MEDIUM"
-
-        # Affected services
-        affected = [n["id"].upper() for n in graph["nodes"] if n["id"] != parsed.service]
-
-        # Memory context
-        mem_note = (
-            f"{penalty['count']} prior incident(s) on record — "
-            f"penalty ×{penalty['penalty']:.2f} applied to confidence"
-            if penalty["active"] else "No prior incidents on record"
+        report = generate_audit_report(
+            ticket=ticket,
+            parsed=parsed,
+            trust=trust,
+            gate=gate,
+            graph=graph,
+            debate=debate,
+            memory_penalty=penalty,
+            ai_notes=ai_notes,
         )
-
-        # Self-doubt summary
-        doubt_lines = [f"  • {f['type']}: {f['msg']} ({f['impact']})" for f in doubt_factors] or ["  • None"]
-
-        # Top risk
-        top_risk = premortem[0] if premortem else None
-
-        # Contradictions
-        contra_lines = [f"  • {c}" for c in parsed.contradictions] or ["  • None detected"]
-
-        # Recommended action
-        if conf >= 0.70:
-            recommendation = "LIKELY SAFE TO APPROVE — confidence is near AUTO threshold. Verify environment and scope."
-        elif conf >= 0.60:
-            recommendation = "REVIEW CAREFULLY — moderate confidence. Confirm rollback plan before approving."
-        else:
-            recommendation = "HIGH CAUTION — confidence is low. Require additional justification or staging test."
-
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-
-        report = f"""╔══════════════════════════════════════════════════════════════════╗
-║          ARIA-LITE++ · HUMAN APPROVAL REQUIRED                  ║
-║          Generated: {now:<44}║
-╚══════════════════════════════════════════════════════════════════╝
-
-TICKET    : {ticket}
-SERVICE   : {parsed.service.upper()}   ACTION: {parsed.action_verb.upper()}
-ENV       : {parsed.environment.upper()}   URGENCY: {parsed.urgency.upper()}
-CONFIDENCE: {conf:.3f}   GATE: APPROVE   RISK: {risk_level}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ⚡ WHAT NEEDS YOUR DECISION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Confidence {conf:.3f} falls in the APPROVE band [0.50–0.80].
-  Binding constraint: {weakest} = {weakest_val:.3f}
-  Affected services : {', '.join(affected) if affected else 'None'}
-
-  {recommendation}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 📊 TRUST SCORES  (formula: C = I × R × (1-B) × P)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Intent Score  : {trust['intent_score']:.3f}  {'✓ clear' if trust['intent_score'] > 0.70 else '⚠ ambiguous'}
-  Reversibility : {rev:.3f}  {'✓ rollback viable' if rev > 0.60 else '⚠ recovery is slow' if rev > 0.30 else '✗ hard to reverse'}
-  Blast Radius  : {blast:.3f}  {'✓ contained' if blast < 0.15 else '⚠ moderate cascade' if blast < 0.35 else '✗ high cascade risk'}
-  Policy Score  : {policy:.3f}  {'✓ compliant' if policy > 0.70 else '⚠ review policy' if policy > 0.40 else '✗ policy concern'}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 🔥 TOP RISK  (pre-mortem)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{f"  SEV{top_risk['severity']} · {top_risk['title']}" if top_risk else "  No critical risks identified"}
-{f"  Likelihood : {top_risk['probability']}%   Impacted deps: {top_risk['impacted_deps']}" if top_risk else ""}
-{f"  Mitigation : {top_risk['mitigation']}" if top_risk else ""}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 🧠 SELF-DOUBT SIGNALS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{chr(10).join(doubt_lines)}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ⚠  CONTRADICTIONS DETECTED
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{chr(10).join(contra_lines)}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 📋 MEMORY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  {mem_note}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ✅ CHECKLIST BEFORE APPROVING
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  [ ] Rollback procedure confirmed and tested
-  [ ] Snapshot / backup taken for affected resources
-  [ ] Downstream services ({', '.join(affected[:3]) if affected else 'none'}) notified
-  [ ] Change window approved by on-call SRE
-  [ ] Monitoring alerts active for blast radius services
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ARIA-LITE++ · engine=trust_engine_v3 · confidence={conf:.4f}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
-
-        return {
-            "report":     report,
-            "gate":       gate,
-            "confidence": conf,
-            "risk_level": risk_level,
-            "binding_constraint": f"{weakest} = {weakest_val:.3f}",
-            "affected_services": affected,
-            "checklist": [
-                "Rollback procedure confirmed and tested",
-                f"Snapshot/backup taken for {parsed.service.upper()}",
-                f"Downstream services notified: {', '.join(affected[:3]) if affected else 'none'}",
-                "Change window approved by on-call SRE",
-                "Monitoring alerts active for blast radius services",
-            ],
-        }
+        return report
 
     except Exception as e:
         traceback.print_exc()
