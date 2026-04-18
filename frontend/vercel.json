@@ -1,7 +1,11 @@
 {
   "buildCommand": "npm run build",
-  "outputDirectory": "dist",
+  "outputDirectory": "dist/public",
+  "framework": "vite",
   "env": {
-    "VITE_API_URL": "@aria-lite-api-url"
+    "VITE_API_URL": {
+      "description": "Backend API URL (e.g., https://aria-lite-backend-XXXXX.onrender.com)",
+      "required": false
+    }
   }
 }

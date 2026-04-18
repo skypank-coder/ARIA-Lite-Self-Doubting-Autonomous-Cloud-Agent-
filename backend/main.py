@@ -19,7 +19,7 @@ from trust_engine_v3 import run_trust_engine, gate_decision
 from iam_simulator import get_iam_simulation
 from memory import memory
 from ai_debate import run_ai_debate
-from self_doubt import apply_self_doubt
+from self_doubt import apply_self_doubt, generate_self_doubt
 from simulation_engine import run_simulation
 from dynamic_graph import get_affected_nodes, build_dynamic_graph
 from ai_layer import ai_adjustment
@@ -153,50 +153,103 @@ def _build_debate(parsed: ParsedIntent, trust: Dict, gate: str) -> Dict:
     }
 
 
-# ── Premortem builder ─────────────────────────────────────────────────────────
+# ── Premortem builder (dynamic) ──────────────────────────────────────────────
 
-def _build_premortem(parsed: ParsedIntent, gate: str) -> List[Dict]:
-    from scenarios import PREMORTEM_ANALYSIS
+def _build_premortem(parsed: ParsedIntent, trust: Dict, graph: Dict) -> List[Dict]:
+    """
+    Generates pre-mortem risks entirely from trust scores, environment,
+    scale, and graph node count. No static template lookup.
+    """
+    risks = []
+    node_count = len(graph.get("nodes", []))
+    scale      = parsed.scope.get("scale_factor", 1)
+    blast      = trust["blast_radius"]
+    rev        = trust["reversibility"]
+    policy     = trust["policy_score"]
+    conf       = trust["confidence"]
 
-    scenario_map = {
-        ("s3",     "safe"):        "s3_create",
-        ("s3",     "destructive"): "s3_create",
-        ("iam",    "destructive"): "iam_delete",
-        ("iam",    "safe"):        "iam_attach",
-        ("iam",    "mutating"):    "iam_attach",
-        ("ec2",    "scaling"):     "ec2_scale",
-        ("ec2",    "safe"):        "ec2_scale",
-        ("rds",    "mutating"):    "rds_modify",
-        ("rds",    "destructive"): "rds_modify",
-        ("lambda", "safe"):        "lambda_deploy",
-        ("lambda", "mutating"):    "lambda_deploy",
-    }
-    key  = scenario_map.get((parsed.service, parsed.action_verb))
-    base = PREMORTEM_ANALYSIS.get(key, []) if key else []
+    if policy < 0.20:
+        risks.append({
+            "severity": 5,
+            "title": "Privilege escalation risk",
+            "probability": 85,
+            "mitigation": "Replace with least-privilege policy. Use IAM Access Analyzer.",
+            "impacted_deps": node_count,
+        })
 
-    extra = []
-    if "prod_destructive" in parsed.risk_signals:
-        extra.append({"failure": "Production outage from destructive action", "severity": 5,
-                      "mitigation": "Stage in dev/staging first. Require 2-person approval."})
-    if "admin_privilege" in parsed.risk_signals:
-        extra.append({"failure": "Admin privilege grants unrestricted AWS access", "severity": 5,
-                      "mitigation": "Replace with least-privilege policy."})
+    if parsed.environment == "production" and parsed.action_verb == "destructive":
+        risks.append({
+            "severity": 5,
+            "title": "Production outage — destructive action on live environment",
+            "probability": 75,
+            "mitigation": "Stage in dev/staging first. Require 2-person approval.",
+            "impacted_deps": node_count,
+        })
+
+    if blast > 0.20:
+        risks.append({
+            "severity": 4,
+            "title": f"Cascade failure — {node_count} dependent service(s) at risk",
+            "probability": round(blast * 100),
+            "mitigation": "Implement circuit breakers. Test in staging with traffic mirroring.",
+            "impacted_deps": node_count,
+        })
+
+    if rev < 0.30:
+        risks.append({
+            "severity": 4,
+            "title": "Low reversibility — recovery window is narrow",
+            "probability": round((1 - rev) * 80),
+            "mitigation": "Create snapshot/backup before execution. Verify rollback procedure.",
+            "impacted_deps": max(1, node_count - 1),
+        })
+
+    if scale > 50:
+        risks.append({
+            "severity": 5,
+            "title": f"Extreme scale change ({scale}×) — infrastructure shock risk",
+            "probability": 70,
+            "mitigation": "Use incremental scaling with canary deployment. Monitor RDS pool.",
+            "impacted_deps": node_count,
+        })
+    elif scale > 10:
+        risks.append({
+            "severity": 3,
+            "title": f"Large scale change ({scale}×) — resource contention likely",
+            "probability": 45,
+            "mitigation": "Pre-warm dependent services. Set scaling cooldown period.",
+            "impacted_deps": max(1, node_count - 1),
+        })
+
     if "public_s3" in parsed.risk_signals:
-        extra.append({"failure": "Public S3 bucket exposes sensitive data", "severity": 5,
-                      "mitigation": "Enable S3 Block Public Access."})
+        risks.append({
+            "severity": 5,
+            "title": "Public S3 bucket — data exposure risk",
+            "probability": 90,
+            "mitigation": "Enable S3 Block Public Access. Audit bucket policy.",
+            "impacted_deps": 1,
+        })
 
-    items = (extra + base)[:3] or [{"failure": "Unknown failure mode", "severity": 2,
-                                     "mitigation": "Manual review required."}]
-    return [
-        {
-            "severity":     it.get("severity", 1),
-            "title":        it.get("failure", "Unknown"),
-            "probability":  (i + 1) * 10 + (5 if gate == "BLOCK" else 0),
-            "mitigation":   it.get("mitigation", ""),
-            "impacted_deps": max(1, it.get("severity", 1) - 1),
-        }
-        for i, it in enumerate(items)
-    ]
+    if conf < 0.30 and not risks:
+        risks.append({
+            "severity": 3,
+            "title": "Low confidence decision — outcome uncertain",
+            "probability": round((1 - conf) * 60),
+            "mitigation": "Clarify ticket intent. Add environment and scope context.",
+            "impacted_deps": node_count,
+        })
+
+    # Always return at least one item, cap at 3
+    if not risks:
+        risks.append({
+            "severity": 1,
+            "title": "No critical failure modes identified",
+            "probability": 5,
+            "mitigation": "Standard monitoring applies.",
+            "impacted_deps": 0,
+        })
+
+    return risks[:3]
 
 
 # ── Execution log builder ─────────────────────────────────────────────────────
@@ -272,34 +325,7 @@ def _build_execution_log(parsed: ParsedIntent, trust: Dict, gate: str) -> List[D
     return entries
 
 
-# ── Simulation builder ────────────────────────────────────────────────────────
-
-def _build_simulation(trust: Dict, parsed: ParsedIntent) -> List[Dict]:
-    import math
-    conf  = trust["confidence"]
-    blast = trust["blast_radius"]
-    scale = parsed.scope.get("scale_factor", 1)
-
-    success = max(10, round(conf * 95))
-    if scale > 10:
-        success = max(10, success - 25)
-    cascade = round(blast * 30)
-    rollback = round((blast * 15) + max(0, scale - 5) * 1.5) if blast > 0.10 or scale > 5 else 0
-    rollback = min(rollback, 25)
-    degraded = max(0, 100 - success - cascade - rollback)
-
-    sims = [
-        {"scenario": "Clean success",       "probability": success,  "detail": f"{parsed.service.upper()} state matches intent.", "type": "success"},
-        {"scenario": "Degraded execution",  "probability": degraded, "detail": "Retry required on one step.",                    "type": "degraded"},
-        {"scenario": "Cascade failure",     "probability": cascade,  "detail": f"Downstream impact detected.",                   "type": "cascading_failure"},
-        {"scenario": "Rollback triggered",  "probability": rollback, "detail": "Auto-rollback armed.",                           "type": "rollback"},
-    ]
-
-    total = sum(s["probability"] for s in sims)
-    if total != 100 and sims:
-        sims[0]["probability"] += 100 - total
-
-    return [s for s in sims if s["probability"] > 0]
+# _build_simulation removed — run_simulation from simulation_engine.py is used directly
 
 
 # ── Core response builder ─────────────────────────────────────────────────────
@@ -326,9 +352,18 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
     # ── AI layer (semantic reasoning) ────────────────────────────────────────
     conf_after_ai, ai_notes = ai_adjustment(ticket, conf_after_memory)
 
+    # ── Dynamic graph (needed by self-doubt for node count) ────────────────────
+    graph = build_dynamic_graph(parsed)
+
     # ── Self-doubt (second-pass reasoning) ───────────────────────────────────
     trust["confidence"] = conf_after_ai
     final_conf, doubt_factors = apply_self_doubt(parsed, trust, conf_after_ai)
+    display_doubt_flags = generate_self_doubt(parsed, trust, graph)
+
+    # Apply multiplicative self-doubt penalty to final confidence
+    doubt_penalty = 1.0 - sum(f["impact"] for f in display_doubt_flags)
+    doubt_penalty = max(0.50, doubt_penalty)   # floor at 0.50 to avoid over-penalising
+    final_conf = round(final_conf * doubt_penalty, 4)
 
     # ── Clamp ─────────────────────────────────────────────────────────────────
     final_conf = round(max(0.0, min(1.0, final_conf)), 4)
@@ -361,17 +396,26 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
                       env=parsed.environment, outcome="ROLLBACK", gate=gate,
                       confidence=final_conf, note="RDS pool exhaustion")
 
-    # ── Dynamic graph ─────────────────────────────────────────────────────────
-    graph = build_dynamic_graph(parsed)
-
     # ── AI Debate ─────────────────────────────────────────────────────────────
-    debate = run_ai_debate(ticket, trust)
+    debate = run_ai_debate(
+        ticket, trust,
+        graph=graph,
+        contradictions=parsed.contradictions,
+        env=parsed.environment,
+        verb=parsed.action_verb,
+        scale=parsed.scope.get("scale_factor", 1.0),
+    )
+
+    # Agent contradiction penalty — close scores signal genuine ambiguity
+    if debate.get("agent_contradiction"):
+        final_conf = round(final_conf * 0.90, 4)
+        trust["confidence"] = final_conf
 
     # ── Simulation ────────────────────────────────────────────────────────────
     simulation = run_simulation(parsed, trust)
 
     # ── Pre-mortem + execution log + IAM sim ───────────────────────────────
-    premortem     = _build_premortem(parsed, gate)
+    premortem     = _build_premortem(parsed, trust, graph)
     execution_log = _build_execution_log(parsed, trust, gate)
     iam_sim       = get_iam_simulation(parsed.scope, parsed.action_verb)
 
@@ -388,7 +432,12 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
             "policy_score":  trust["policy_score"],
             "confidence":    final_conf,
         },
-        "debate":        debate,
+        "debate":        {
+            **debate,
+            "executor_strength": debate.get("scores", {}).get("executor_strength"),
+            "critic_strength":   debate.get("scores", {}).get("critic_strength"),
+            "agent_contradiction": debate.get("agent_contradiction"),
+        },
         "premortem":     premortem,
         "execution_log": execution_log,
         "simulation":    simulation,
@@ -406,7 +455,11 @@ def _build_response(ticket: str, parsed: ParsedIntent) -> Dict:
         "iam_simulation":  iam_sim,
         "graph":           graph,
         "self_doubt":      doubt_factors,
-        "self_doubt_flags": doubt_factors,   # alias for frontend
+        "self_doubt_flags": [
+            {"type": f["type"], "msg": f["msg"],
+             "impact": f"-{int(f['impact'] * 100)}%"}
+            for f in display_doubt_flags
+        ],
         "ai_notes":        ai_notes,
         "parsed_meta": {
             "verb_class":   parsed.action_verb,
@@ -802,6 +855,178 @@ Keep it concise but technical. Return clean structured text."""
             "source":     "rule_based",
             "gate":       gate,
             "confidence": conf,
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
+
+
+# ── APPROVE-gate human audit report ──────────────────────────────────────────
+
+class ApproveAuditRequest(BaseModel):
+    ticket: str
+
+
+@app.post("/audit/approve")
+def approve_audit(req: ApproveAuditRequest):
+    """
+    Generates a concise, action-oriented audit report for APPROVE-gate tickets.
+    Designed for human reviewers who need to decide in under 2 minutes.
+    Only runs when gate == APPROVE; returns 400 otherwise.
+    """
+    try:
+        ticket = req.ticket.strip()
+        if not ticket:
+            return {"error": "Empty ticket"}
+
+        parsed   = parse_ticket(ticket)
+        v3_input = _to_v3(parsed)
+        trust    = run_trust_engine(v3_input)
+        trust["affected_count"] = len(v3_input["affected_nodes"])
+
+        penalty = memory.get_penalty(service=parsed.service,
+                                     verb=parsed.action_verb,
+                                     env=parsed.environment)
+        conf, ai_notes = ai_adjustment(ticket, round(trust["confidence"] * penalty["penalty"], 4))
+        trust["confidence"] = conf
+        conf, doubt_factors = apply_self_doubt(parsed, trust, conf)
+        conf = round(max(0.0, min(1.0, conf)), 4)
+        trust["confidence"] = conf
+        gate = _map_gate(gate_decision(conf))
+
+        if gate != "APPROVE":
+            return {
+                "error": f"Ticket resolved as {gate}, not APPROVE — no human review needed",
+                "gate": gate,
+                "confidence": conf,
+            }
+
+        graph    = build_dynamic_graph(parsed)
+        premortem = _build_premortem(parsed, trust, graph)
+
+        blast  = trust["blast_radius"]
+        rev    = trust["reversibility"]
+        policy = trust["policy_score"]
+
+        # Binding constraint
+        components = {
+            "intent":        trust["intent_score"],
+            "reversibility": rev,
+            "policy":        policy,
+            "blast_margin":  round(1.0 - blast, 3),
+        }
+        weakest     = min(components, key=components.get)
+        weakest_val = components[weakest]
+
+        # Risk level
+        risk_level = "HIGH" if conf < 0.60 else "MEDIUM"
+
+        # Affected services
+        affected = [n["id"].upper() for n in graph["nodes"] if n["id"] != parsed.service]
+
+        # Memory context
+        mem_note = (
+            f"{penalty['count']} prior incident(s) on record — "
+            f"penalty ×{penalty['penalty']:.2f} applied to confidence"
+            if penalty["active"] else "No prior incidents on record"
+        )
+
+        # Self-doubt summary
+        doubt_lines = [f"  • {f['type']}: {f['msg']} ({f['impact']})" for f in doubt_factors] or ["  • None"]
+
+        # Top risk
+        top_risk = premortem[0] if premortem else None
+
+        # Contradictions
+        contra_lines = [f"  • {c}" for c in parsed.contradictions] or ["  • None detected"]
+
+        # Recommended action
+        if conf >= 0.70:
+            recommendation = "LIKELY SAFE TO APPROVE — confidence is near AUTO threshold. Verify environment and scope."
+        elif conf >= 0.60:
+            recommendation = "REVIEW CAREFULLY — moderate confidence. Confirm rollback plan before approving."
+        else:
+            recommendation = "HIGH CAUTION — confidence is low. Require additional justification or staging test."
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        report = f"""╔══════════════════════════════════════════════════════════════════╗
+║          ARIA-LITE++ · HUMAN APPROVAL REQUIRED                  ║
+║          Generated: {now:<44}║
+╚══════════════════════════════════════════════════════════════════╝
+
+TICKET    : {ticket}
+SERVICE   : {parsed.service.upper()}   ACTION: {parsed.action_verb.upper()}
+ENV       : {parsed.environment.upper()}   URGENCY: {parsed.urgency.upper()}
+CONFIDENCE: {conf:.3f}   GATE: APPROVE   RISK: {risk_level}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ⚡ WHAT NEEDS YOUR DECISION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Confidence {conf:.3f} falls in the APPROVE band [0.50–0.80].
+  Binding constraint: {weakest} = {weakest_val:.3f}
+  Affected services : {', '.join(affected) if affected else 'None'}
+
+  {recommendation}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 📊 TRUST SCORES  (formula: C = I × R × (1-B) × P)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Intent Score  : {trust['intent_score']:.3f}  {'✓ clear' if trust['intent_score'] > 0.70 else '⚠ ambiguous'}
+  Reversibility : {rev:.3f}  {'✓ rollback viable' if rev > 0.60 else '⚠ recovery is slow' if rev > 0.30 else '✗ hard to reverse'}
+  Blast Radius  : {blast:.3f}  {'✓ contained' if blast < 0.15 else '⚠ moderate cascade' if blast < 0.35 else '✗ high cascade risk'}
+  Policy Score  : {policy:.3f}  {'✓ compliant' if policy > 0.70 else '⚠ review policy' if policy > 0.40 else '✗ policy concern'}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🔥 TOP RISK  (pre-mortem)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{f"  SEV{top_risk['severity']} · {top_risk['title']}" if top_risk else "  No critical risks identified"}
+{f"  Likelihood : {top_risk['probability']}%   Impacted deps: {top_risk['impacted_deps']}" if top_risk else ""}
+{f"  Mitigation : {top_risk['mitigation']}" if top_risk else ""}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🧠 SELF-DOUBT SIGNALS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{chr(10).join(doubt_lines)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ⚠  CONTRADICTIONS DETECTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{chr(10).join(contra_lines)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 📋 MEMORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  {mem_note}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ✅ CHECKLIST BEFORE APPROVING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  [ ] Rollback procedure confirmed and tested
+  [ ] Snapshot / backup taken for affected resources
+  [ ] Downstream services ({', '.join(affected[:3]) if affected else 'none'}) notified
+  [ ] Change window approved by on-call SRE
+  [ ] Monitoring alerts active for blast radius services
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ARIA-LITE++ · engine=trust_engine_v3 · confidence={conf:.4f}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
+
+        return {
+            "report":     report,
+            "gate":       gate,
+            "confidence": conf,
+            "risk_level": risk_level,
+            "binding_constraint": f"{weakest} = {weakest_val:.3f}",
+            "affected_services": affected,
+            "checklist": [
+                "Rollback procedure confirmed and tested",
+                f"Snapshot/backup taken for {parsed.service.upper()}",
+                f"Downstream services notified: {', '.join(affected[:3]) if affected else 'none'}",
+                "Change window approved by on-call SRE",
+                "Monitoring alerts active for blast radius services",
+            ],
         }
 
     except Exception as e:

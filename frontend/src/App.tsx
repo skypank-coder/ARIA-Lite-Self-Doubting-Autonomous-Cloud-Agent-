@@ -9,7 +9,6 @@ import { ExecutionLog } from "@/components/ExecutionLog";
 import { TicketInput } from "@/components/TicketInput";
 import { SystemStatusBar } from "@/components/SystemStatusBar";
 import { type ARIAResponse } from "@/lib/presets";
-import { getApiUrl } from "@/lib/api";
 
 interface Toast {
   id: number;
@@ -23,7 +22,6 @@ export default function App() {
   const [ticket, setTicket] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [data, setData] = useState<ARIAResponse | null>(null);
-  const [currentScenario, setCurrentScenario] = useState<string>("");
   const [viewMode, setViewMode] = useState<"graph" | "simulation">("graph");
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [memoryCount, setMemoryCount] = useState(0);
@@ -52,29 +50,25 @@ export default function App() {
     const startTime = Date.now();
 
     try {
-      const resp = await fetch(getApiUrl("process_ticket"), {
+      const resp = await fetch("/api/process_ticket", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticket: ticketText }),
-        signal: abortRef.current.signal,
+        signal: abortRef.current!.signal,
       });
-
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-      const json: ARIAResponse = await resp.json();
+      const json = await resp.json() as ARIAResponse;
       const elapsed = Date.now() - startTime;
 
       setElapsedMs(elapsed);
       setData(json);
-      const scenario = json.scenario ?? "unknown";
-      setCurrentScenario(scenario);
 
       if (json.has_rollback) {
         setMemoryCount(prev => prev + 1);
         setMemoryTooltip("ec2_scale — RDS pool exhaustion — eu-west-1");
       }
 
-      addToast(`Analysis complete: ${scenario}`);
+      addToast(`Analysis complete: ${json.gate} — ${json.scenario ?? json.parsed?.service ?? "unknown"}`);
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
 
@@ -87,7 +81,7 @@ export default function App() {
         (err as Error).message.includes("NetworkError");
 
       if (isNetworkError) {
-        addToast("❌ Backend unreachable — ensure server is running on port 8001");
+        addToast("❌ Backend unreachable — ensure server is running or check VITE_API_URL");
       } else {
         addToast(`❌ Error: ${(err as Error).message}`);
       }
@@ -111,10 +105,10 @@ export default function App() {
       style={{
         display: "flex",
         flexDirection: "column",
-        height: "100dvh",
+        minHeight: "100dvh",
         width: "100vw",
         background: "var(--aria-bg)",
-        overflow: "hidden",
+        overflowY: "auto",
       }}
     >
       <Topbar elapsedMs={elapsedMs} memoryCount={memoryCount} memoryTooltip={memoryTooltip} />
@@ -122,39 +116,35 @@ export default function App() {
 
       <div
         style={{
-          flex: 1,
           display: "grid",
           gridTemplateColumns: "22% 46% 32%",
-          gridTemplateRows: "58% 42%",
-          gap: 8,
-          padding: 8,
-          overflow: "hidden",
-          minHeight: 0,
+          gridTemplateRows: "auto auto",
+          gap: 10,
+          padding: 10,
         }}
       >
         <div style={{ gridColumn: "1", gridRow: "1 / 3", minHeight: 0 }}>
           <TrustDecomp data={data} loading={loading} />
         </div>
 
-        <div style={{ gridColumn: "2", gridRow: "1", minHeight: 0 }}>
+        <div style={{ gridColumn: "2", gridRow: "1", minHeight: 380 }}>
           <DependencyGraph
-            scenario={currentScenario}
+            data={data}
             loading={loading}
             viewMode={viewMode}
             onViewChange={setViewMode}
-            simulation={data?.simulation ?? []}
           />
         </div>
 
-        <div style={{ gridColumn: "2", gridRow: "2", minHeight: 0 }}>
+        <div style={{ gridColumn: "2", gridRow: "2", minHeight: 280 }}>
           <DebateEngine data={data} loading={loading} />
         </div>
 
-        <div style={{ gridColumn: "3", gridRow: "1", minHeight: 0 }}>
+        <div style={{ gridColumn: "3", gridRow: "1", minHeight: 460 }}>
           <PreMortem data={data} loading={loading} />
         </div>
 
-        <div style={{ gridColumn: "3", gridRow: "2", minHeight: 0 }}>
+        <div style={{ gridColumn: "3", gridRow: "2", minHeight: 280 }}>
           <ExecutionLog data={data} loading={loading} />
         </div>
       </div>

@@ -1,79 +1,100 @@
 """
 simulation_engine.py — ARIA-Lite++
-Generates outcome probability distributions from real risk factors.
+Monte Carlo probabilistic simulation (200 runs).
+Outcomes vary per confidence, reversibility, blast_radius, node_count.
 """
 
+import random
 from typing import Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from parser import ParsedIntent
 
+_COLORS = {
+    "success":           "#1DB87A",
+    "degraded":          "#E07B2A",
+    "cascading_failure": "#CF3A3A",
+    "rollback":          "#7B5CF0",
+}
+
+_RUNS = 200
+
 
 def run_simulation(parsed: "ParsedIntent", trust: Dict) -> List[Dict]:
-    """
-    Generates outcome scenarios based on blast radius, reversibility,
-    confidence, risk signals, and environment.
-    """
-    blast = trust["blast_radius"]
-    rev   = trust["reversibility"]
-    conf  = trust["confidence"]
+    conf  = max(0.0, min(1.0, trust["confidence"]))
+    blast = max(0.0, min(1.0, trust["blast_radius"]))
+    rev   = max(0.0, min(1.0, trust["reversibility"]))
+    count = max(trust.get("affected_count", 1), 1)
+    svc   = parsed.service.upper()
 
-    risk_score = blast + (1.0 - rev)
+    # Cascade threshold scales with blast and node count
+    cascade_threshold = blast * min(1.0, count / 6.0)
 
-    if "extreme_scale" in parsed.risk_signals:
-        risk_score += 0.20
-    if "prod_destructive" in parsed.risk_signals:
-        risk_score += 0.15
-    if "admin_privilege" in parsed.risk_signals:
-        risk_score += 0.10
-    if parsed.environment == "production":
-        risk_score += 0.10
+    outcomes = {"success": 0, "degraded": 0, "cascade": 0, "rollback": 0}
 
-    risk_score = min(1.0, risk_score)
+    for _ in range(_RUNS):
+        r = random.random()
 
-    success_raw  = int((1.0 - risk_score) * conf * 100)
-    success_prob = max(5, min(90, success_raw))
+        if r < conf * rev:
+            outcomes["success"] += 1
+        elif r < conf * rev + cascade_threshold:
+            outcomes["cascade"] += 1
+        elif r < 0.6 + blast * 0.2:
+            outcomes["degraded"] += 1
+        else:
+            outcomes["rollback"] += 1
 
-    # Rollback only meaningful when blast > 0.10 or scale > 5
-    scale = parsed.scope.get("scale_factor", 1)
-    rollback_prob = 0
-    if blast > 0.10 or scale > 5:
-        rollback_prob = max(5, int(blast * 20 + max(0, scale - 5) * 1.5))
-        rollback_prob = min(rollback_prob, 25)
+    total = sum(outcomes.values()) or 1
 
-    cascade_prob = max(0, int(blast * 25))
-    degraded_prob = max(0, 100 - success_prob - rollback_prob - cascade_prob)
+    s = round(outcomes["success"]  / total * 100)
+    d = round(outcomes["degraded"] / total * 100)
+    c = round(outcomes["cascade"]  / total * 100)
+    r = round(outcomes["rollback"] / total * 100)
+
+    # Fix rounding drift
+    drift = 100 - (s + d + c + r)
+    # Add drift to largest bucket
+    buckets = [("success", s), ("degraded", d), ("cascade", c), ("rollback", r)]
+    buckets.sort(key=lambda x: x[1], reverse=True)
+    name_map = {"success": 0, "degraded": 1, "cascade": 2, "rollback": 3}
+    vals = [s, d, c, r]
+    vals[name_map[buckets[0][0]]] += drift
+
+    s, d, c, r = vals
 
     scenarios = [
         {
             "scenario":    "Successful execution",
-            "probability": success_prob,
-            "detail":      f"{parsed.service.upper()} state matches intent.",
+            "probability": max(s, 0),
+            "detail":      f"{svc} state matches intent. conf={conf:.2f} × rev={rev:.2f}.",
             "type":        "success",
+            "color":       _COLORS["success"],
+            "driver":      f"conf {conf:.2f} × rev {rev:.2f}",
         },
         {
             "scenario":    "Degraded execution",
-            "probability": degraded_prob,
-            "detail":      "Partial completion — retry required on one step.",
+            "probability": max(d, 0),
+            "detail":      f"Partial completion — reversibility {rev:.2f} limits clean recovery.",
             "type":        "degraded",
+            "color":       _COLORS["degraded"],
+            "driver":      f"rev {rev:.2f}, blast {blast:.2f}",
         },
         {
             "scenario":    "Cascade failure",
-            "probability": cascade_prob,
-            "detail":      f"Downstream impact on {trust.get('affected_count', 0)} resource(s).",
+            "probability": max(c, 0),
+            "detail":      f"Blast {blast:.2f} across {count} service(s) — cascade threshold {cascade_threshold:.2f}.",
             "type":        "cascading_failure",
+            "color":       _COLORS["cascading_failure"],
+            "driver":      f"blast {blast:.2f} × nodes {count}",
         },
         {
             "scenario":    "Rollback triggered",
-            "probability": rollback_prob,
-            "detail":      "Auto-rollback armed — compensating transaction required.",
+            "probability": max(r, 0),
+            "detail":      f"Low confidence ({conf:.2f}) elevates rollback probability.",
             "type":        "rollback",
+            "color":       _COLORS["rollback"],
+            "driver":      f"1 - conf {conf:.2f}",
         },
     ]
-
-    # Normalize to exactly 100
-    total = sum(s["probability"] for s in scenarios)
-    if total != 100 and scenarios:
-        scenarios[0]["probability"] += 100 - total
 
     return [s for s in scenarios if s["probability"] > 0]

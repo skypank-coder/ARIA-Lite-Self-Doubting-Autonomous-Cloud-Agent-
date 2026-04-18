@@ -131,8 +131,9 @@ export interface ARIAResponse {
   }>;
 
   graph?: {
-    nodes: Array<{ id: string; type: string }>;
+    nodes: Array<{ id: string; type: string; risk?: number }>;
     edges: Array<{ from: string; to: string }>;
+    explanation?: string;
   };
 
   ticket_engine?: {

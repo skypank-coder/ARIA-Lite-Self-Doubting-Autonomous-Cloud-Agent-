@@ -1,201 +1,274 @@
-# ARIA-Lite Deployment Guide
+# Complete Deployment Guide: ARIA-Lite++ on Render + Vercel
 
-Complete guide to deploy ARIA-Lite++ with backend on Render and frontend on Vercel.
+This guide covers deploying both backend (Render) and frontend (Vercel) with everything you need.
 
-## Overview
+## Architecture Overview
 
 ```
-┌─────────────────────────────────┐
-│   Vercel Frontend (React)       │
-│   https://aria-lite.vercel.app  │
-└──────────────┬──────────────────┘
-               │ HTTPS API Calls
-               │ (VITE_API_URL env var)
-               ▼
-┌─────────────────────────────────┐
-│   Render Backend (FastAPI)      │
-│   https://aria-lite-backend...  │
-│   (API Endpoint on port $PORT)  │
-└─────────────────────────────────┘
+PRODUCTION (After Deployment):
+════════════════════════════════════════════════════════════════
+
+  User Browser
+        ↓
+  https://aria-lite.vercel.app (Frontend)
+        ↓ fetch with VITE_API_URL
+        ↓
+  https://aria-lite-backend-XXXXX.onrender.com (Backend)
+        ↓
+  Analysis Engine (trust_engine_v3)
+        ↓
+  JSON Response → Frontend → User
 ```
 
-## Step 1: Deploy Backend on Render
+## Files Modified/Created
 
-### 1.1 Prepare Backend
-The `render.yaml` file is already configured. Verify requirements.txt exists:
+### Backend
+- `backend/render.yaml` - Render deployment config (NEW)
+- `backend/requirements.txt` - Already correct
+- `backend/main.py` - Already has CORS enabled
+
+### Frontend
+- `frontend/vercel.json` - Vercel deployment config (NEW)
+- `frontend/src/lib/api.ts` - Smart API client (NEW)
+- `frontend/src/App.tsx` - Updated to use new API client
+- `frontend/vite.config.ts` - Already fixed for production
+
+## Deployment Timeline
+
+```
+Step 1: Deploy Backend (2-3 minutes)
+├─ Push code to GitHub
+├─ Create Render web service
+├─ Wait for build and deployment
+└─ Get backend URL: https://aria-lite-backend-XXXXX.onrender.com
+
+Step 2: Deploy Frontend (1-2 minutes)
+├─ Set VITE_API_URL environment variable in Vercel
+├─ Import project to Vercel
+├─ Set output directory to dist/public
+├─ Deploy
+└─ Get frontend URL: https://aria-lite.vercel.app
+
+Step 3: Test (2-3 minutes)
+├─ Open frontend URL
+├─ Submit test ticket
+└─ Verify response from backend
+```
+
+## Quick Start (5 Minutes)
+
+### 1. Deploy Backend to Render
+
 ```bash
-cat backend/requirements.txt
-```
-
-### 1.2 Push to GitHub
-```bash
-git add backend/
-git commit -m "Prepare backend for Render deployment"
+# Ensure latest code is on GitHub
 git push origin main
+
+# Go to https://render.com
+# Click "New +" → "Web Service"
+# Connect GitHub repository
+# Set Root Directory: backend
+# Set Build Command: pip install -r requirements.txt
+# Set Start Command: uvicorn main:app --host 0.0.0.0 --port $PORT
+# Click Deploy
+# Wait 2-3 minutes
+# Copy the URL shown, e.g., https://aria-lite-backend-XXXXX.onrender.com
 ```
 
-### 1.3 Deploy on Render
-1. Go to https://render.com
-2. Sign in with GitHub
-3. Click **"New +"** → **"Web Service"**
-4. Connect your GitHub account and select repository
-5. Configure:
-   - **Root Directory**: `backend`
-   - **Runtime**: Python 3.11
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-6. Click **"Deploy"**
+For detailed instructions, see: [backend/RENDER_DEPLOYMENT.md](../backend/RENDER_DEPLOYMENT.md)
 
-### 1.4 Get Backend URL
-After deployment completes, Render shows your service URL:
-```
-https://aria-lite-backend-XXXXX.onrender.com
-```
+### 2. Deploy Frontend to Vercel
 
-**Save this URL** - you'll need it for frontend configuration.
-
----
-
-## Step 2: Deploy Frontend on Vercel
-
-### 2.1 Prepare Frontend
-Verify `vercel.json` and API configuration exist:
 ```bash
-cat frontend/vercel.json
-cat frontend/src/lib/api.ts
+# Go to https://vercel.com
+# Click "Add New" → "Project"
+# Select your GitHub repository
+# Set Root Directory: frontend
+# Set Output Directory: dist/public
+
+# Add Environment Variable:
+# Key: VITE_API_URL
+# Value: https://aria-lite-backend-XXXXX.onrender.com (the URL from step 1)
+
+# Click Deploy
+# Wait 1-2 minutes
+# Access frontend at: https://aria-lite.vercel.app
 ```
 
-### 2.2 Push to GitHub
+For detailed instructions, see: [frontend/VERCEL_DEPLOYMENT.md](../frontend/VERCEL_DEPLOYMENT.md)
+
+### 3. Test
+
 ```bash
-git add frontend/
-git commit -m "Prepare frontend for Vercel deployment"
-git push origin main
-```
-
-### 2.3 Deploy on Vercel
-1. Go to https://vercel.com/dashboard
-2. Click **"Add New..."** → **"Project"**
-3. Import your GitHub repository
-4. Configure:
-   - **Framework**: Vite
-   - **Root Directory** (if needed): `frontend`
-   - **Build Command**: `npm run build`
-   - **Output Directory**: `dist`
-5. Before clicking **Deploy**, go to **"Environment Variables"**
-
-### 2.4 Add Render Backend URL as Environment Variable
-In Vercel's Environment Variables section:
-- **Key**: `VITE_API_URL`
-- **Value**: Paste your Render backend URL
-  ```
-  https://aria-lite-backend-XXXXX.onrender.com
-  ```
-- **Environments**: Select `Production`
-- Click **"Add"**
-
-Then click **"Deploy"**
-
-### 2.5 Get Frontend URL
-After deployment, Vercel provides:
-```
+# Open in browser
 https://aria-lite.vercel.app
+
+# Try submitting: "scale ec2 from 2 to 8"
+# Should see analysis within a few seconds
 ```
 
----
+## How It Works
 
-## Step 3: Test End-to-End Connection
+### Development (Local)
 
-### 3.1 Test Backend Health
+```typescript
+// frontend/src/lib/api.ts detects we're in development
+fetch("/api/process_ticket")
+  ↓
+// Vite proxy intercepts /api/* requests and rewrites them
+// Path: /api/process_ticket → /process_ticket
+// Target: http://localhost:8001
+  ↓
+// Backend receives request
+```
+
+### Production (Deployed)
+
+```typescript
+// frontend/src/lib/api.ts detects we're in production
+fetch(VITE_API_URL + "/api/process_ticket")
+// Where VITE_API_URL = https://aria-lite-backend-XXXXX.onrender.com
+  ↓
+// Direct HTTPS request to Render backend
+  ↓
+// Backend receives request
+```
+
+## Environment Variables
+
+### Vercel
+
+Only one environment variable needed:
+
+| Key | Value | Example |
+|-----|-------|---------|
+| `VITE_API_URL` | Your backend URL | `https://aria-lite-backend-abc123.onrender.com` |
+
+Set in: **Project Settings → Environment Variables**
+
+### Render
+
+No custom environment variables needed. Render automatically provides:
+- `PORT` - The port to listen on (we use it in start command)
+
+## Troubleshooting
+
+### "Failed to fetch" error
+
+**Problem**: Frontend can't reach backend
+
+**Solution**:
+1. Check backend URL in Vercel env vars
+2. Verify backend is "Live" on Render dashboard
+3. Test directly: `curl https://your-backend-url/health`
+
+### Slow responses (20-30 seconds)
+
+**Problem**: Free tier Render cold starts
+
+**Expected**: First request after idle takes 20-30 seconds
+**Solution**: This is normal for free tier, not an error
+
+### "Backend unreachable" in UI
+
+**Problem**: Frontend deployed but showing error
+
+**Solution**:
+1. Vercel: Check Project Settings → Environment Variables
+2. Ensure `VITE_API_URL` is set to your Render URL
+3. Redeploy frontend: Deployments → Redeploy
+
+### Build fails on Vercel
+
+**Problem**: Build logs show errors
+
+**Solution**: Check Vercel build logs
+```
+Deployments → [Click failed deployment] → Logs
+```
+
+Common fixes:
+- Check output directory is `dist/public`
+- Verify TypeScript errors are resolved
+- Ensure all dependencies are in package.json
+
+## Local Development
+
+You can mix local + deployed:
+
+```bash
+# Option 1: Both local
+cd backend && uvicorn main:app --port 8001
+cd frontend && npm run dev  # Uses Vite proxy
+
+# Option 2: Local frontend + deployed backend
+VITE_API_URL=https://aria-lite-backend-XXXXX.onrender.com npm run dev
+# Open http://localhost:5174
+
+# Option 3: Both deployed
+# Just open https://aria-lite.vercel.app
+```
+
+## Performance Expectations
+
+| Scenario | Response Time | Notes |
+|----------|---------------|-------|
+| Local → Local | <100ms | No network latency |
+| Browser → Deployed | 2-5s | Render cold start, network |
+| Subsequent requests | <1s | Render warm instance |
+
+## Monitoring
+
+### Check Backend Status
+
 ```bash
 curl https://aria-lite-backend-XXXXX.onrender.com/health
 ```
 
-Expected response:
+Returns:
 ```json
-{"status": "ok", "service": "ARIA-LITE++", "version": "5.0.0"}
+{"status":"ok","service":"ARIA-LITE++","version":"5.0.0"}
 ```
 
-### 3.2 Test Backend API
-```bash
-curl -X POST https://aria-lite-backend-XXXXX.onrender.com/process_ticket \
-  -H "Content-Type: application/json" \
-  -d '{"ticket": "scale ec2 from 2 to 8"}'
-```
+### View Logs
 
-### 3.3 Test Frontend in Browser
-1. Open https://aria-lite.vercel.app
-2. Enter a test ticket: "scale ec2 from 2 to 8"
-3. Submit and verify:
-   - ✅ Page loads
-   - ✅ Analysis completes
-   - ✅ Returns gate decision (AUTO/APPROVE/BLOCK)
-
----
-
-## Troubleshooting
-
-### Backend shows "Internal Server Error" (500)
-- Check Render logs: Dashboard → Service → Logs
-- Verify `main.py` starts correctly
-- Test health endpoint: `/health`
-
-### Frontend shows "Backend unreachable"
-- Verify `VITE_API_URL` environment variable is set in Vercel
-- Check browser DevTools Network tab to see actual request URL
-- Ensure Render backend URL is correct (with https://)
-- Wait ~30 seconds for Render cold start (free tier)
-
-### CORS errors
-- Backend already has CORS enabled
-- No additional configuration needed
-
-### Build fails on Vercel
-- Ensure `npm run build` works locally:
-  ```bash
-  cd frontend && npm run build
-  ```
-- Check dist folder is created
-- Verify `vite.config.ts` has correct output directory
-
----
-
-## How API Requests Work
-
-**During Local Development:**
-- Frontend: http://localhost:5174
-- Request to `/api/process_ticket` 
-- Vite proxy intercepts → forwards to http://localhost:8001
-- No environment variable needed
-
-**In Production (Deployed):**
-- Frontend: https://aria-lite.vercel.app
-- Request to `https://aria-lite-backend-XXXXX.onrender.com/process_ticket`
-- Uses `VITE_API_URL` environment variable
-- Direct HTTPS call (no proxy)
-
----
-
-## Cost Considerations
-
-- **Render**: Free tier includes:
-  - One web service
-  - Shared CPU
-  - 0.5GB RAM
-  - Cold starts after 15 min inactivity
-  
-- **Vercel**: Free tier includes:
-  - Unlimited deployments
-  - Fast build times
-  - Automatic HTTPS
-  - Generous bandwidth
-
----
+**Render**: Dashboard → Services → [Your service] → Logs
+**Vercel**: Dashboard → Deployments → [Your deployment] → Logs
 
 ## Next Steps
 
-After successful deployment:
-1. Monitor Render logs for errors
-2. Set up Render notifications for deployments
-3. Configure custom domain (optional)
-4. Enable environment variable protection (optional)
-5. Set up automatic deploys on GitHub push
+1. **Immediate**: Deploy both services (5 minutes)
+2. **Testing**: Submit test tickets and verify
+3. **Optimization**: Monitor performance, adjust if needed
+4. **Custom Domain**: Add custom domain to Vercel (optional)
+
+## Support Resources
+
+- Render Docs: https://render.com/docs
+- Vercel Docs: https://vercel.com/docs
+- FastAPI Docs: https://fastapi.tiangolo.com
+- React Docs: https://react.dev
+
+## Quick Commands Reference
+
+```bash
+# Test backend health
+curl https://aria-lite-backend-XXXXX.onrender.com/health
+
+# Test backend API
+curl -X POST https://aria-lite-backend-XXXXX.onrender.com/process_ticket \
+  -H "Content-Type: application/json" \
+  -d '{"ticket": "scale ec2 from 2 to 8"}'
+
+# Test frontend (just open in browser)
+https://aria-lite.vercel.app
+
+# Redeploy frontend
+# (In Vercel dashboard: Deployments → Redeploy latest)
+
+# View frontend logs
+# (In Vercel dashboard: Deployments → [latest] → Logs)
+```
+
+---
+
+**Ready to deploy?** Start with [backend/RENDER_DEPLOYMENT.md](../backend/RENDER_DEPLOYMENT.md)

@@ -166,17 +166,6 @@ export function TrustDecomp({ data, loading }: TrustDecompProps) {
           </span>
         </div>
       </div>
-
-      {/* Confidence Timeline */}
-      {!loading && data?.memory_timeline && (
-        <ConfidenceTimeline
-          timeline={data.memory_timeline
-            .flatMap(e => e.history)
-            .slice(-8)}
-          penalty={data.memory?.penalty ?? 1.0}
-        />
-      )}
-
       <div className="px-3 pt-3 pb-3 flex-1">
         <span className="panel-header">Decision Gate</span>
         <div className="mt-2">
@@ -186,77 +175,6 @@ export function TrustDecomp({ data, loading }: TrustDecompProps) {
             <GateCard gate={gate ?? null} confidence={trust?.confidence ?? 0} />
           )}
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Confidence Timeline ──────────────────────────────────────────────────────
-
-interface TimelineEntry {
-  confidence: number;
-  gate:       string;
-  timestamp:  string;
-}
-
-function ConfidenceTimeline({ timeline, penalty }: { timeline: TimelineEntry[]; penalty: number }) {
-  if (timeline.length < 2) return null;
-
-  const W = 200, H = 72;
-  const PAD = { t: 8, b: 16, l: 4, r: 4 };
-  const iW = W - PAD.l - PAD.r;
-  const iH = H - PAD.t - PAD.b;
-
-  const GATE_COLOR: Record<string, string> = {
-    AUTO:    "#1DB87A",
-    APPROVE: "#E07B2A",
-    BLOCK:   "#CF3A3A",
-  };
-
-  const xOf = (i: number) => PAD.l + (i / Math.max(timeline.length - 1, 1)) * iW;
-  const yOf = (c: number) => PAD.t + (1 - c) * iH;
-
-  const pts = timeline.map((e, i) => `${xOf(i)},${yOf(e.confidence)}`).join(" ");
-
-  const y80 = yOf(0.80);
-  const y50 = yOf(0.50);
-
-  return (
-    <div className="px-3 pb-2" style={{ borderTop: "1px solid var(--aria-border)", paddingTop: 8 }}>
-      <div className="flex justify-between items-center mb-1">
-        <span className="panel-header" style={{ fontSize: 9 }}>CONFIDENCE HISTORY</span>
-        <span className="mono" style={{ fontSize: 9, color: "var(--aria-muted)" }}>
-          {timeline.length} runs
-        </span>
-      </div>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
-        {/* threshold lines */}
-        <line x1={PAD.l} y1={y80} x2={W - PAD.r} y2={y80}
-          stroke="#1DB87A" strokeWidth={0.5} strokeDasharray="3,3" opacity={0.4} />
-        <line x1={PAD.l} y1={y50} x2={W - PAD.r} y2={y50}
-          stroke="#E07B2A" strokeWidth={0.5} strokeDasharray="3,3" opacity={0.4} />
-        {/* line */}
-        <polyline points={pts} fill="none" stroke="#2D4A5E" strokeWidth={1.5} />
-        {/* dots */}
-        {timeline.map((e, i) => (
-          <circle
-            key={i}
-            cx={xOf(i)} cy={yOf(e.confidence)}
-            r={i === timeline.length - 1 ? 5 : 3}
-            fill={GATE_COLOR[e.gate] ?? "#5A7080"}
-          />
-        ))}
-        {/* latest value label */}
-        <text
-          x={W - PAD.r} y={yOf(timeline[timeline.length - 1].confidence) - 6}
-          textAnchor="end" fill="#C9D6E3" fontSize={8}
-          fontFamily="'JetBrains Mono', monospace"
-        >
-          {timeline[timeline.length - 1].confidence.toFixed(3)}
-        </text>
-      </svg>
-      <div className="mono" style={{ fontSize: 9, color: "var(--aria-muted)", marginTop: 2 }}>
-        memory penalty: ×{penalty.toFixed(2)}
       </div>
     </div>
   );
